@@ -1,0 +1,53 @@
+<spob name="Evolution Station I">
+ <lua>evolve.lua</lua>
+ <pos x="-3354.178874" y="-7499.199403"/>
+ <GFX>
+  <space>station-pointy1</space>
+  <exterior>scrapped_station</exterior>
+ </GFX>
+ <presence>
+     <faction>Evolvers</faction>
+     <base>10</base>
+     <bonus>5</bonus>
+     <range>0</range>
+ </presence>
+ <general>
+  <class>0</class>
+  <population>50000</population>
+  <hide>2.000000</hide>
+  <services>
+   <land/>
+   <refuel/>
+   <bar/>
+   <missions/>
+   <outfits/>
+   <shipyard/>
+  </services>
+  <description>TODO Description</description>
+  <bar>TODO Bar Description</bar>
+ </general>
+ <tech>
+  <item>Engines Cargo</item>
+  <item>Hulls Medium</item>
+  <item>Systems Medium</item>
+  <item>Systems High</item>
+  <item>Laser 1</item>
+  <item>Ion 1</item>
+  <item>Kinetic 1</item>
+  <item>Plasma 1</item>
+  <item>High Tech Upgrades 1</item>
+  <item>Star Maps</item>
+  <item>Basic Outfits 2</item>
+  <item>Basic Trade Ships</item>
+  <item>Bulk Trade Ships</item>
+  <item>Light Civilian Combat Ships</item>
+  <item>Criminal Outfits</item>
+  <item>Goddard Merchantman</item>
+ </tech>
+ <tags>
+  <tag>nonpc</tag>
+  <tag>criminal</tag>
+  <tag>station</tag>
+  <tag>nonews</tag>
+ </tags>
+</spob>

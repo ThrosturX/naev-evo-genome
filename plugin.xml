@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plugin name="Evolving Factions">
+    <author>ThrosturX</author>
+    <version>0.13</version>
+    <compatibility>0\.(1[23])\..*</compatibility>
+    <priority>1</priority>
+    <description>Adds evolving factions into the game, kinda, maybe.</description>
+</plugin>

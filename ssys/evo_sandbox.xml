@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ssys name="Evolution Sandbox">
+ <general>
+  <background>nebu_ngc_2392</background>
+  <radius>3000.000000</radius>
+  <spacedust>300</spacedust>
+  <interference>16.000000</interference>
+ </general>
+ <pos x="-700.0" y="0.0"/>
+ <spobs>
+     <spob>Evolution Station I</spob>
+ </spobs>
+ <jumps/>
+ <tags>
+     <tag>noderelicts</tag>
+ </tags>
+ <asteroids>
+  <asteroid>
+   <group>typeA-standard</group>
+   <radius>5000.000000</radius>
+   <pos x="0.000000" y="0.000000"/>
+   <density>0.250000</density>
+  </asteroid>
+ </asteroids>
+</ssys>

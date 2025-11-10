@@ -1,0 +1,24 @@
+<faction name="Evolvers">
+ <ai>independent</ai>
+ <logo>marauder</logo>
+ <static/>
+ <invisible/>
+ <known/>
+ <player>3</player>
+ <colour>green</colour>
+ <spawn>independent</spawn>
+ <standing>static</standing>
+ <allies/>
+ <enemies>
+  <enemy>Pirate</enemy>
+  <enemy>Marauder</enemy>
+  <enemy>Wild Ones</enemy>
+  <enemy>Dreamer Clan</enemy>
+  <enemy>Raven Clan</enemy>
+  <enemy>Black Lotus</enemy>
+  <enemy>Collective</enemy>
+ </enemies>
+ <tags>
+  <tag>generic</tag>
+ </tags>
+</faction>

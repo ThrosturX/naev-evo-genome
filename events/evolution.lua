@@ -30,7 +30,7 @@ local evobtn
 
 local GENOMES = {}
 
-local MAX_GENOMES = 16
+local MAX_GENOMES = 8
 function pick_top_genome ( f_id, fallback_size )
     if not fallback_size then
         fallback_size = 100

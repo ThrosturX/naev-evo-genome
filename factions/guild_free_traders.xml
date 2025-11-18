@@ -1,6 +1,6 @@
-<faction name="Evolvers">
- <ai>pirate_norun</ai>
- <logo>marauder</logo>
+<faction name="Guild of Free Traders">
+ <ai>pirate</ai>
+ <logo>trader</logo>
  <static/>
  <invisible/>
  <known/>
@@ -17,6 +17,7 @@
   <enemy>Raven Clan</enemy>
   <enemy>Black Lotus</enemy>
   <enemy>Collective</enemy>
+  <enemy>Scientific Research Conglomerate</enemy>
  </enemies>
  <tags>
   <tag>generic</tag>

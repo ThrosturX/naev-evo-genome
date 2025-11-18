@@ -1,0 +1,7 @@
+identifier = "evoFactions"
+name = "Evolving Factions"
+author = "ThrosturX"
+version = "0.0.1"
+abstract = "Adds GA factions"
+naev_version = ">= 0.13.0"
+source = "local"

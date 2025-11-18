@@ -3,12 +3,13 @@
  <general>
   <background>nebu_ngc_2392</background>
   <radius>3000.000000</radius>
-  <spacedust>300</spacedust>
-  <interference>16.000000</interference>
+  <spacedust>100</spacedust>
+  <interference>0</interference>
  </general>
  <pos x="-700.0" y="0.0"/>
  <spobs>
-     <spob>Evolution Station I</spob>
+     <spob>Red Station</spob>
+     <spob>Blue Station</spob>
  </spobs>
  <jumps/>
  <tags>
@@ -17,9 +18,9 @@
  <asteroids>
   <asteroid>
    <group>typeA-standard</group>
-   <radius>5000.000000</radius>
-   <pos x="0.000000" y="0.000000"/>
-   <density>0.250000</density>
+   <radius>800.000000</radius>
+   <pos x="0.000000" y="1200.000000"/>
+   <density>0.625000</density>
   </asteroid>
  </asteroids>
 </ssys>

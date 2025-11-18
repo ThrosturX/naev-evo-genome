@@ -1,12 +1,12 @@
-<spob name="Red Station">
+<spob name="Blue Station">
  <lua>evolve.lua</lua>
- <pos x="-1400.0" y="-500.0"/>
+ <pos x="1690.000000" y="699.290403"/>
  <GFX>
-  <space>station-commerce4</space>
-  <exterior>scrapped_station</exterior>
+  <space>station-round2</space>
+  <exterior>traderoom</exterior>
  </GFX>
  <presence>
-     <faction>Guild of Free Traders</faction>
+     <faction>Scientific Research Conglomerate</faction>
      <base>0</base>
      <bonus>0</bonus>
      <range>0</range>
@@ -24,7 +24,7 @@
    <shipyard/>
   </services>
   <description>TODO Description</description>
-  <bar>TODO Bar Description</bar>
+  <bar>More like a library than a bar.</bar>
  </general>
  <tech>
   <item>Engines Cargo</item>

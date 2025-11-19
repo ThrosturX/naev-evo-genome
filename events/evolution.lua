@@ -367,6 +367,15 @@ function EVO_DISCUSS_RESEARCH()
     }
     vn.menu(choices)
 
+    vn.label("reset_research")
+    vn.func(function()
+        for i = #fac_genomes, 1, -1 do
+            table.remove(fac_genomes, i)
+        end
+    end)
+    scientist("Well, okay then.")
+    vn.jump("end")
+
     -- === GENOME SECTION ===
     vn.label("view_genomes")
     local g_choices = {}

@@ -7,15 +7,14 @@
 </event>
 --]]
 --[[
-   Evolution Event (v3.1 - Stable)
+   Evolution Event (v3.2 - Analytics)
 
    This event runs constantly in the background and manages evolution of ship genomes.
 
    Changes:
-   * Fixed 'require tk' crash.
-   * Refactored VN to safe state-machine structure.
-   * Implemented Ship Pool Management (Small/Big tables).
-   * Persistent storage of faction-specific ship pools.
+   * Restored 'enumerate_codons' for detailed genetic breakdown.
+   * Added Scientist summary (Total Codons / Suppressor count).
+   * Restored console debug print in display_info.
 --]]
 local fmt           = require "format"
 local vn            = require "vn"
@@ -27,7 +26,7 @@ local dna_mod       = require "dna_modifier.dna_modifier"
 
 -- Configuration
 local MAX_GENOMES          = 6
-local CATACLYSM_CHANCE     = 2
+local CATACLYSM_CHANCE     = 0.5
 local ARENA_RADIUS         = 5000
 local FAC_BLUE             = "Scientific Research Conglomerate"
 local FAC_RED              = "Guild of Free Traders"
@@ -206,9 +205,9 @@ local function determine_genome_size(fac)
     return val
 end
 
-function spawn_warrior(fac, hull, size_class)
+function spawn_warrior(fac, hull, size_class, genome)
     -- Auto-pick hull if missing
-    if not hull then
+    if not hull or not ship.get(hull) then
         local ships_data = mem.evolution[fac].ships
         -- Safety init
         if not ships_data then ships_data = { small={}, big={} } end
@@ -233,8 +232,12 @@ function spawn_warrior(fac, hull, size_class)
 
     local sp = pilot.add(hull, fac, nil)
     local smem = sp:memory()
-    smem.genome = get_genome(fac, determine_genome_size(fac))
     if math.random(3) == 1 then smem.norun = true end
+    if genome ~= nil then
+        smem.genome = genome
+    else
+        smem.genome = get_genome(fac, determine_genome_size(fac))
+    end
 
     dna_mod.apply_dna_to_pilot(sp, smem.genome)
     hook.pilot(sp, "death", "EVOLVE")
@@ -260,10 +263,15 @@ local function spawn_champion(fac)
     local genomes = GENOMES[fac]
     if not genomes or #genomes == 0 then return end
     local top = genomes[1]
+    if #genomes > 3 and math.random(#genomes) == 1 then
+        -- spawn runner-up
+        top = genomes[2]
+    end
     local hull = top.hull
-    local champ = spawn_warrior(fac, hull)
+    local champ = spawn_warrior(fac, hull, "big", top.genome)
     hook.pilot(champ, "attacked", "CHAMP_ATTACKED")
-    champ:broadcast("Watch out, here I come!")
+    champ:rename(fmt.f("Hyena M-{no}/{fac}", {no = top.genome:len(), fac = fac:gsub("[^A-Z]", "")} ))
+    champ:broadcast(fmt.f("The {fac} is not to be messed with!", {fac=fac}))
 end
 
 function EVOLVE(dead_pilot, killer)
@@ -354,6 +362,7 @@ function EVO_DISCUSS_RESEARCH()
     local choices = {
         {"Examine Genomes", "view_genomes"},
         {"Manage Ships", "manage_ships"},
+        {"Scrap Research", "reset_research"},
         {"Leave", "end"}
     }
     vn.menu(choices)
@@ -361,7 +370,6 @@ function EVO_DISCUSS_RESEARCH()
     -- === GENOME SECTION ===
     vn.label("view_genomes")
     local g_choices = {}
-    -- Dynamically build jump labels based on current indices
     for i, entry in ipairs(fac_genomes) do
         local label = fmt.f("({s}) {g}/{l} ({hull})", { s=entry.score, g=string.sub(entry.genome,1,8), l=entry.genome:len(), hull=entry.hull })
         table.insert(g_choices, { label, "set_g_idx_"..i })
@@ -383,14 +391,34 @@ function EVO_DISCUSS_RESEARCH()
         local entry = fac_genomes[selected_genome_idx]
         if not entry then return "Error: Genome lost." end
 
-        local msg = fmt.f("Hull: {h}\nScore: {s}\nSeq: {g}", {h=entry.hull, s=entry.score, g=entry.genome})
+        -- Analytics
+        local breakdown_list = dna_mod.enumerate_codons(entry.genome)
+        local suppressor_count = 0
+        local breakdown_str = ""
+        for _, item in ipairs(breakdown_list) do
+            if string.find(item, "suppress") then
+                suppressor_count = suppressor_count + 1
+            end
+            breakdown_str = breakdown_str .. "\n - " .. item
+        end
+
+        local msg = fmt.f("Hull: {h}\nScore: {s}\nSeq: {g}...", {h=entry.hull, s=entry.score, g=string.sub(entry.genome, 1, 16)})
+
+        -- The requested summary:
+        msg = msg .. fmt.f("\n\nThe genome has {c} known codons, {s} of which are suppressor genes.", {c=#breakdown_list, s=suppressor_count})
+
+        msg = msg .. "\n\n[Net Attributes]"
         local mods = dna_mod.decode_dna(entry.genome)
         for k, v in pairs(mods) do msg = msg .. "\n" .. k .. ": " .. v end
+
+        msg = msg .. "\n\n[Codon Breakdown]" .. breakdown_str
+
         return msg
     end)
 
     vn.menu({
         {"Purchase Ship", "g_buy"},
+        {"Prototype new hull", "g_hull"},
         {"Irradiate", "g_rad"},
         {"Forget", "g_del"},
         {"Back", "view_genomes"}
@@ -403,18 +431,32 @@ function EVO_DISCUSS_RESEARCH()
     end)
     vn.jump("end")
 
+    vn.label("g_hull")
+    vn.func(function()
+        local entry = fac_genomes[selected_genome_idx]
+        if entry then
+            local ships_data = mem.evolution[fac].ships
+            local size_class = "small"
+            if math.random(6) == 1 then size_class = "big" end
+            entry.hull = ships_data[size_class][math.random(#ships_data[size_class])]
+        end
+    end)
+    scientist(function() return fmt.f("We'll build a {hull}", {hull = fac_genomes[selected_genome_idx].hull}) end)
+    vn.jump("end")
+
     vn.label("g_rad")
     vn.func(function()
         local entry = fac_genomes[selected_genome_idx]
         if entry then
              local target = tk.input("Radiation Target", 4, 16, "mutagen type")
              if target then
+                 -- remove the old one (consumed by research)
+                 table.remove(fac_genomes, selected_genome_idx)
                  local res = dna_mod.research_irradiate(entry.genome, target)
                  table.insert(fac_genomes, { genome=dna_mod.mutate_random(res, 0.01), score=entry.score, hull=entry.hull })
              end
         end
     end)
-    -- Must end because list changed
     scientist("Experimental genome added to pool.")
     vn.jump("end")
 
@@ -423,7 +465,6 @@ function EVO_DISCUSS_RESEARCH()
         table.remove(fac_genomes, selected_genome_idx)
     end)
     scientist("Genome data purged.")
-    -- Must end because list structure changed, invalidating the "view_genomes" menu graph
     vn.jump("end")
 
     -- === SHIPS SECTION ===
@@ -452,20 +493,15 @@ function EVO_DISCUSS_RESEARCH()
         local input = tk.input("Ship Hull", 3, 30, "Hull Name")
         if input then
             local ok, res = add_ship_to_pool(fac, input)
-            if not ok then
-                -- Since we can't easily print immediate output without a node, we use spark/print or just rely on loop
-                print("Ship Add Error: "..res)
-            end
+            if not ok then print("Ship Add Error: "..res) end
         end
     end)
-    vn.jump("manage_ships") -- Loop back to refresh list
+    vn.jump("manage_ships")
 
     vn.label("s_remove")
     vn.func(function()
         local input = tk.input("Ship Hull", 3, 30, "Hull Name")
-        if input then
-            remove_ship_from_pool(fac, input)
-        end
+        if input then remove_ship_from_pool(fac, input) end
     end)
     vn.jump("manage_ships")
 
@@ -483,7 +519,18 @@ end
 
 function hailed(receiver)
     local rmem = receiver:memory()
+    if not rmem.score then rmem.score = 0 end
+
+    -- Analytics for hail
+    local breakdown_list = dna_mod.enumerate_codons(rmem.genome)
+    local suppressor_count = 0
+    for _, item in ipairs(breakdown_list) do
+        if string.find(item, "suppress") then suppressor_count = suppressor_count + 1 end
+    end
+
     local msg = fmt.f("Genome ({g})... Score: {s}", {g = string.sub(rmem.genome, 1, 8), s=rmem.score})
+    msg = msg .. fmt.f("\nSummary: {c} active codons ({s} suppressors)", {c=#breakdown_list, s=suppressor_count})
+
     local mods = dna_mod.decode_dna(rmem.genome)
     for k, v in pairs(mods) do msg = msg .. fmt.f("\n{k}: {v}", {k=k, v=v}) end
 
@@ -533,6 +580,25 @@ local function init_ship_tables(f_id)
     end
 end
 
+-- Restored debug display for devs
+function display_info()
+    print("++GENOMES++")
+    for fac, genomes in pairs(GENOMES) do
+        local s_pool = mem.evolution[fac] and mem.evolution[fac].ships.small or {}
+        local b_pool = mem.evolution[fac] and mem.evolution[fac].ships.big or {}
+        print(fmt.f("Faction {f} :: Small: {s}, Big: {b}", {f=fac, s=#s_pool, b=#b_pool}))
+
+        for i, entry in ipairs(genomes) do
+            local msg = ""
+            -- Use the enumerate functionality here too
+            local codons = dna_mod.enumerate_codons(entry.genome)
+            for _, codon in ipairs(codons) do msg = msg .. ", " .. tostring(codon) end
+            print(fmt.f("({f}) {v}: {m}", {m=msg,v=entry.score,fac=fac}))
+        end
+    end
+    print("--GENOMES--")
+end
+
 function load()
     if not mem.evolution then mem.evolution = {} end
     init_ship_tables(FAC_BLUE)
@@ -543,9 +609,7 @@ function load()
         init_ship_tables(f_id)
     end
 
-    player.infoButtonRegister(_("Evolution"), function()
-        print("Use the Station Scientist to inspect evolution data.")
-    end, 3)
+    player.infoButtonRegister(_("Evolution"), display_info, 3)
     land()
 end
 

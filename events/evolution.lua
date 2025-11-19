@@ -167,7 +167,8 @@ function SCORE_ATTACKED(receiver, attacker, amount)
     if not pmem.score then pmem.score = amount end
     if not amem.score then amem.score = amount * 10 end
     pmem.score = math.floor(math.max(pmem.score, amount + pmem.score * 0.1))
-    amem.score = math.floor((amem.score * 0.99) + (amount * 3.75 / attacker:ship():size()))
+    local asz = attacker:ship():size()
+    amem.score = math.floor((amem.score * 0.99) + (amount * (4.75 - asz) / asz))
     local sz_diff = receiver:ship():size() - attacker:ship():size()
     -- underdog bonus
     if sz_diff > 0 then
@@ -257,11 +258,11 @@ function EVOLVE(dead_pilot, killer)
     for _, entry in ipairs(GENOMES[f_id]) do
         if entry.genome == genome and entry.hull == hull then
             if final_score > entry.score then
-                entry.score = final_score
                 print(fmt.f("Updated {f} {g}: {old} -> {new}", {
                     f = f_id, g = string.sub(genome, 1, 8),
                     old = entry.score, new = final_score
                 }))
+                entry.score = final_score
             end
             updated = true
             break
@@ -287,7 +288,7 @@ function EVOLVE(dead_pilot, killer)
         killer:effectClear(false, false, false)
         local kmem = killer:memory()
         if not kmem.score then kmem.score = score * 0.3 end
-        local kill_bonus = 200 * dead_pilot:ship():size()
+        local kill_bonus = 75 * dead_pilot:ship():size()
         kmem.score = math.floor(kmem.score + kill_bonus + final_score * 0.3)
         killer:broadcast(fmt.f("I have {v} points now!", {v=kmem.score}))
 
@@ -369,6 +370,10 @@ function load()
         end
     end
 
+    if not mem.evolution_purchases then
+        mem.evolution_purchases = {}
+    end
+
     evobtn = player.infoButtonRegister(_("Evolution"), display_info, 3)
     land()  -- Setup NPCs if landed in sandbox
 end
@@ -431,10 +436,28 @@ function EVO_CHECK_SYSTEM()
     hook.timer(3, "EVO_CHECK_SYSTEM")
 end
 
+function SOLD_EVO_SHIP ( stype, sname, ref )
+    if sname == sref or mem.evolution_purchases[sname] ~= nil then
+        mem.evolution_purchases[ref] = nil
+    end
+end
+
+local function purchase_hull ( hull, genome )
+    local a_spob, a_sys = spob.cur()
+    local new_ship = player.shipAdd(
+        hull,
+        "Modified " .. hull,
+        fmt.f("Acquired via Genetics research at {sp} in the {sy} system", { sp = a_spob, sy = a_sys }),
+        false -- force name
+    )
+    mem.evolution_purchases[new_ship] = genome
+    hook.ship_sell( "SOLD_EVO_SHIP", new_ship )
+end
+
 -- NPC: Genome research discussion
 function EVO_DISCUSS_RESEARCH()
-    local spob = spob.cur()
-    local fac = spob:faction():nameRaw()
+    local loc = spob.cur()
+    local fac = loc:faction():nameRaw()
     local fac_genomes = GENOMES[fac] or {}
 
     local choices = {}
@@ -467,8 +490,9 @@ function EVO_DISCUSS_RESEARCH()
                 if not entry then return end
 
                 local genome = entry.genome
-                msg = fmt.f("{g} scored {s} on {h}", {
+                msg = fmt.f("{g} ({gl}) scored {s} on {h}", {
                     g = string.sub(genome, 1, 16),
+                    gl = genome:len(),
                     s = entry.score,
                     h = entry.hull
                 })
@@ -488,17 +512,25 @@ function EVO_DISCUSS_RESEARCH()
     vn.label("speak_msg")
     scientist(function() return msg end)
     local affect_choices = {
+        { "Purchase", "purchase" }, -- TODO: set price
         { "Irradiate", "irradiate" },
         { "Forget", "delete" },
         { "Cancel", "end" }
     }
     vn.menu(affect_choices)
+    vn.label("purchase")
+    vn.func(function()
+        local entry = fac_genomes[choice_id]
+        if not entry then return end
+        -- TODO: Payment and confirmation
+        purchase_hull(entry.hull, entry.genome)
+    end)
+    vn.jump("end")
     vn.label("irradiate")
     scientist("The available mutagens to target are:\nterminator, defense, propulsion, weaponry, utility\nNote that the purpose of radiation research is to neutralize the target mutagen.")
     vn.func(function()
         local entry = fac_genomes[choice_id]
         if not entry then return end
-        local genome = entry.genome
         local target_mutagen = tk.input("Radiation Target", 4, 16, "mutagen type")
         local researched_genome = dna_mod.research_irradiate(entry.genome, target_mutagen)
         table.insert(fac_genomes, {
@@ -532,7 +564,7 @@ end
 -- Hail response: show mods and score in VN
 function hailed(receiver)
     local rmem = receiver:memory()
-    local msg = fmt.f("My genome ({g}) provides the following modifications:", {g = string.sub(rmem.genome, 1, 8)})
+    local msg = fmt.f("My genome ({g}/{l}) provides the following modifications:", {g = string.sub(rmem.genome, 1, 8), l = rmem.genome:len()})
     local mods = dna_mod.decode_dna(rmem.genome)
     for attribute, value in pairs(mods) do
         msg = msg .. fmt.f("\n{attr}: {val}", {attr=attribute, val=value})
@@ -565,6 +597,16 @@ function land()
 end
 
 function enter()
+    --  print purchased custom ships
+--  for k,v in pairs(mem.evolution_purchases) do
+--      print(fmt.f("{k}: {v}", {k=k, v=string.sub(v, 1, 8)}))
+--  end
+    -- apply any purchased ship effects
+    local genome = mem.evolution_purchases[player.ship()]
+    if genome ~= nil then
+        print(fmt.f("Applying {g} to {s}", { g = genome, s = player.ship() }))
+        dna_mod.apply_dna_to_pilot(player.pilot(), genome)
+    end
     local cur = system.cur()
     if cur:nameRaw() ~= "Evolution Sandbox" then return end
 

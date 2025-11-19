@@ -57,7 +57,7 @@ local SMALL_SPAWN_SHIPS = {
 
 local BIG_SPAWN_SHIPS = {
     "Phalanx", "Admonisher", "Vigilance", "Hawking", "Goddard Merchantman",
-    "Dvaered Phalanx", "Pirate Phalanx", "Kestrel"
+    "Dvaered Phalanx", "Pirate Phalanx", "Kestrel", "Pacifier", "Dealbreaker"
 }
 
 local SPAWN_SHIP = "Llama"
@@ -160,8 +160,11 @@ function get_genome(fac, default_size)
     return candidates[math.random(#candidates)]
 end
 
--- Scores damage: defender loses score, attacker gains
+-- Scores damage
 function SCORE_ATTACKED(receiver, attacker, amount)
+    if attacker:mothership() ~= nil then
+        attacker = attacker:mothership()
+    end
     local pmem = receiver:memory()
     local amem = attacker:memory()
     if not pmem.score then pmem.score = amount end
@@ -242,6 +245,9 @@ end
 
 -- Evolution trigger: on death, record genome performance
 function EVOLVE(dead_pilot, killer)
+    if killer ~= nil and killer:mothership() ~= nil then
+        killer = killer:mothership()
+    end
     local dmem = dead_pilot:memory()
     local score = dmem.score or 0
     local f_id = dead_pilot:faction():nameRaw()
@@ -370,10 +376,6 @@ function load()
         end
     end
 
-    if not mem.evolution_purchases then
-        mem.evolution_purchases = {}
-    end
-
     evobtn = player.infoButtonRegister(_("Evolution"), display_info, 3)
     land()  -- Setup NPCs if landed in sandbox
 end
@@ -436,22 +438,16 @@ function EVO_CHECK_SYSTEM()
     hook.timer(3, "EVO_CHECK_SYSTEM")
 end
 
-function SOLD_EVO_SHIP ( stype, sname, ref )
-    if sname == sref or mem.evolution_purchases[sname] ~= nil then
-        mem.evolution_purchases[ref] = nil
-    end
-end
-
 local function purchase_hull ( hull, genome )
     local a_spob, a_sys = spob.cur()
+    local strict_name = "Modified " .. hull
     local new_ship = player.shipAdd(
         hull,
-        "Modified " .. hull,
+        strict_name,
         fmt.f("Acquired via Genetics research at {sp} in the {sy} system", { sp = a_spob, sy = a_sys }),
-        false -- force name
+        true -- force name
     )
-    mem.evolution_purchases[new_ship] = genome
-    hook.ship_sell( "SOLD_EVO_SHIP", new_ship )
+    player.shipvarPush("genome", genome, strict_name)
 end
 
 -- NPC: Genome research discussion
@@ -465,10 +461,11 @@ function EVO_DISCUSS_RESEARCH()
         local label = fmt.f("({score}) {strep} ({hull})", {
             score = entry.score,
             hull  = entry.hull,
-            strep = string.sub(entry.genome, 1, 8)
+            strep = fmt.f("{g}/{l}", { g = string.sub(entry.genome, 1, 8), l = entry.genome:len()})
         })
         table.insert(choices, {label, tostring(index)})
     end
+    table.insert(choices, { "Restart Research", "reset" })
     table.insert(choices, { "Nevermind", "end" })
 
     local msg = nil
@@ -524,6 +521,13 @@ function EVO_DISCUSS_RESEARCH()
         if not entry then return end
         -- TODO: Payment and confirmation
         purchase_hull(entry.hull, entry.genome)
+    end)
+    vn.jump("end")
+    vn.label("reset")
+    vn.func(function()
+        for i = #fac_genomes, 1, -1 do
+            table.remove(fac_genomes, i)
+        end
     end)
     vn.jump("end")
     vn.label("irradiate")
@@ -597,14 +601,10 @@ function land()
 end
 
 function enter()
-    --  print purchased custom ships
---  for k,v in pairs(mem.evolution_purchases) do
---      print(fmt.f("{k}: {v}", {k=k, v=string.sub(v, 1, 8)}))
---  end
-    -- apply any purchased ship effects
-    local genome = mem.evolution_purchases[player.ship()]
+    -- apply custom genome if applicable
+    local genome = player.shipvarPeek("genome")
     if genome ~= nil then
-        print(fmt.f("Applying {g} to {s}", { g = genome, s = player.ship() }))
+        print(fmt.f("{s} has a custom genome: {g}", { g = genome, s = player.ship() }))
         dna_mod.apply_dna_to_pilot(player.pilot(), genome)
     end
     local cur = system.cur()

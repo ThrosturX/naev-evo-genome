@@ -42,7 +42,10 @@ local CODON_MAP = {
     ["TCTC"] = { type = "positive", category = "defense", attribute = "shield_mod", value = 0.15, debuffs = { { attribute = "stress_dissipation", value = -20, tag = "HIGH_CAP_SHIELD_A" } } },
     ["AGTC"] = { type = "positive", category = "defense", attribute = "shield_regen", value = 0.10, debuffs = { { attribute = "shield_mod", value = -0.05, tag = "FAST_CHARGE_SHIELD_A" } } },
     ["CGCG"] = { type = "positive", category = "defense", attribute = "armour", value = 150, debuffs = { { attribute = "accel_mod", value = -0.05, tag = "REINFORCED_BULKHEAD_A" } } },
-    ["AATT"] = { type = "positive", category = "defense", attribute = "armour_regen", value = 10, debuffs = { { attribute = "armour_mod", value = -0.10, tag = "NANITE_REPAIR_A" } } },
+    ["CGCT"] = { type = "positive", category = "defense", attribute = "armour", value = 50, debuffs = { { attribute = "mass", value = 100, tag = "REINFORCED_BULKHEAD_A" } } },
+    ["AATT"] = { type = "positive", category = "defense", attribute = "armour_regen", value = 2, debuffs = { { attribute = "armour_mod", value = -0.10, tag = "NANITE_REPAIR_A" } } },
+    ["AATG"] = { type = "positive", category = "defense", attribute = "armour_regen", value = 3, debuffs = { { attribute = "armour_mod", value = -0.15, tag = "NANITE_REPAIR_A" } } },
+    ["AATG"] = { type = "positive", category = "defense", attribute = "armour_regen", value = 5, debuffs = { { attribute = "armour_mod", value = -0.15, tag = "NANITE_REPAIR_A" }, { attribute = "mass_mod", value = 0.1, tag = "REINFORCED_BULKHEAD_A" } } },
 
     -- Group: Mobility & Propulsion
     ["CTAG"] = { type = "positive", category = "propulsion", attribute = "speed_mod", value = 0.10, debuffs = { { attribute = "armour_mod", value = -0.08, tag = "AGGRESSIVE_TUNING_A" } } },
@@ -86,6 +89,7 @@ local PALINDROME_MAP = {
     ["CTAGGCAT"] = { type = "palindrome", attribute = "cpu", value = 50 },
     ["TCAGCTGA"] = { type = "palindrome", attribute = "shield_regen", value = 0.25 },
     ["AGCTAGCT"] = { type = "palindrome", attribute = "weapon_firerate", value = 0.25 },
+    ["AATTACCA"] = { type = "palindrome", attribute = "armour_regen", value = 10},
 }
 
 -- ####################################################################
@@ -252,16 +256,55 @@ function DnaModifier.mutate_random(dna_string, mutation_rate)
     local mutated_dna = ""
     for i = 1, #dna_string do
         if math.random() < mutation_rate then
-            local mutation_type = math.random(3)
+            local mutation_type = math.random(6)
+            -- if 3: deletion
             if mutation_type == 1 then -- Substitution
                 mutated_dna = mutated_dna .. NUCLEOTIDES[math.random(#NUCLEOTIDES)]
             elseif mutation_type == 2 then -- Insertion
                 mutated_dna = mutated_dna .. NUCLEOTIDES[math.random(#NUCLEOTIDES)] .. dna_string:sub(i, i)
+            elseif mutation_type == 3 then -- Insertion (double)
+                mutated_dna = mutated_dna .. NUCLEOTIDES[math.random(#NUCLEOTIDES)] .. NUCLEOTIDES[math.random(#NUCLEOTIDES)] .. dna_string:sub(i, i)
+            elseif mutation_type == 4 then -- duplication (group)
+                local start_pos = math.max(1, i - 1)
+                local end_pos = math.min(#dna_string, i + 2)
+                mutated_dna = mutated_dna .. dna_string:sub(start_pos, end_pos)
+            elseif mutation_type == 5 then -- duplication (single)
+                mutated_dna = mutated_dna .. dna_string:sub(i, i) .. dna_string:sub(i, i)
             end
         else
             mutated_dna = mutated_dna .. dna_string:sub(i, i)
         end
     end
+
+    local MAX_LENGTH = 1024
+    local EXTREME_LENGTH = 2 * MAX_LENGTH
+
+    -- Handle extreme cases first
+    if #mutated_dna > EXTREME_LENGTH then
+        -- Lose half the genome (hard truncate to half)
+        mutated_dna = mutated_dna:sub(1, math.floor(#mutated_dna / 2))
+    end
+
+    -- Now handle normal capping if over MAX_LENGTH
+    if #mutated_dna > MAX_LENGTH then
+        -- Search for the last terminator codon
+        local last_terminator_pos = nil
+        for pos = #mutated_dna - #TERMINATOR_CODON + 1, 1, -1 do
+            if mutated_dna:sub(pos, pos + #TERMINATOR_CODON - 1) == TERMINATOR_CODON then
+                last_terminator_pos = pos
+                break
+            end
+        end
+
+        if last_terminator_pos then
+            -- Cut at the start of the last terminator (excluding it and everything after)
+            mutated_dna = mutated_dna:sub(1, last_terminator_pos - 1)
+        else
+            -- No terminator found; append one at the end
+            mutated_dna = mutated_dna .. TERMINATOR_CODON
+        end
+    end
+
     return mutated_dna
 end
 

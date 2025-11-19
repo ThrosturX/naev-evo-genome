@@ -123,7 +123,10 @@ function get_genome(fac, default_size)
     local pool_size = math.min(8, #genomes)
     if pool_size > 2 then
         for i = 1, pool_size do
-            table.insert(candidates, dna_mod.mutate_random(genomes[i].genome, mut_rate))
+            local pool_genome = genomes[i].genome
+            if pool_genome ~= nil then
+                table.insert(candidates, dna_mod.mutate_random(pool_genome, mut_rate))
+            end
         end
     else
         table.insert(candidates, dna_mod.mutate_random(genome, 0.06))
@@ -205,6 +208,40 @@ local function determine_genome_size(fac)
     return val
 end
 
+function spawn_miner(fac, hull)
+    -- Auto-pick hull if missing
+    if not hull or not ship.get(hull) then
+        local pool = {
+            "Koala", "Quicksilver", "Rhino", "Pirate Rhino",
+            "Goddard Merchantman", "Llama", "Gawain", "Hyena",
+            "Plowshare", "Mule", "Zebra"
+        }
+        hull = pool[math.random(#pool)]
+    end
+
+    local miner = pilot.add(hull, "Miner", nil, nil, { ai = "miner" }) 
+    miner:setFaction(fac)
+    local pmem = miner:memory()
+
+    local genomes = GENOMES[fac]
+    -- give it a random genome
+    if genomes and #genomes >= 1 then
+        pmem.genome = genomes[math.random(#genomes)].genome
+        dna_mod.apply_dna_to_pilot(miner, pmem.genome)
+        -- hook it on landing (success for a miner)
+        if not pmem.lhook then
+            pmem.lhook = hook.pilot(miner, "land", "EVO_MINER_LANDED")
+        end
+    end
+
+    -- can't start with cargo, remove it all
+    for _i, v in ipairs(miner:cargoList()) do
+        miner:cargoRm(v.c, v.q)
+    end
+
+    return miner
+end
+
 function spawn_warrior(fac, hull, size_class, genome)
     -- Auto-pick hull if missing
     if not hull or not ship.get(hull) then
@@ -277,19 +314,20 @@ end
 function EVO_MINER_LANDED(miner, location)
     -- calculate cargo worth
     local total_value = 0
-    for _i, v in ipairs(miner:cargoList()) do
-        total_value = total_value + v.q * commodity.price(v.c)
-    end
     local pmem = miner:memory()
     if not pmem.score then pmem.score = 0 end
-    local final_score = math.floor(total_value * 0.02) + pmem.score
+    local final_score = math.floor((total_value * 0.0247 / miner:ship():size()) + pmem.score)
     
     local f_id = miner:faction():nameRaw()
-    local hull = miner:ship():nameRaw()
-    local genome = pmem.genome
-    -- contribute to the genome
-    table.insert(GENOMES[f_id], { genome = genome, score  = final_score, hull = hull })
-    miner:broadcast(fmt.f("I landed with cargo worth {t}! (final score {s})", { t = total_value, s = final_score } ))
+    if final_score > 300 and #GENOMES[f_id] < MAX_GENOMES + 2 then
+        local hull = miner:ship():nameRaw()
+        local genome = pmem.genome
+        -- contribute to the genome
+        table.insert(GENOMES[f_id], { genome = genome, score  = final_score, hull = hull })
+
+        miner:comm(fmt.f("I landed with cargo worth {t}! (final score {s})", { t = total_value, s = final_score } ))
+    end
+    print(fmt.f("{f} {h} landed with cargo worth {t}! (final score {s})", { t = total_value, s = final_score, h = miner:ship():nameRaw(), f = f_id } ))
 end
 
 function EVOLVE(dead_pilot, killer)
@@ -301,7 +339,7 @@ function EVOLVE(dead_pilot, killer)
     local hull = dead_pilot:ship():nameRaw()
     local final_score = math.floor(score)
 
-    dead_pilot:broadcast(fmt.f("I died with a score of {v}", {v = final_score}))
+--  dead_pilot:broadcast(fmt.f("I died with a score of {v}", {v = final_score}))
 
     if not GENOMES[f_id] then GENOMES[f_id] = {} end
 
@@ -327,7 +365,9 @@ function EVOLVE(dead_pilot, killer)
         if not kmem.score then kmem.score = score * 0.3 end
         local kill_bonus = 75 * dead_pilot:ship():size()
         kmem.score = math.floor(kmem.score + kill_bonus + final_score * 0.3)
-        killer:broadcast(fmt.f("I have {v} points now!", {v=kmem.score}))
+        if kmem.score > 1000 then
+            killer:broadcast(fmt.f("I have {v} points now!", {v=kmem.score}))
+        end
 
         local k_f_id = killer:faction():nameRaw()
         if kmem.genome then
@@ -390,6 +430,8 @@ function EVO_DISCUSS_RESEARCH()
         for i = #fac_genomes, 1, -1 do
             table.remove(fac_genomes, i)
         end
+        -- insert a new genome
+        table.insert(fac_genomes, { genome = dna_mod.generate_junk_dna(determine_genome_size(fac)), score=0, hull="Llama"})
     end)
     scientist("Well, okay then.")
     vn.jump("end")
@@ -666,10 +708,13 @@ function EVO_CHECK_SYSTEM()
     if cur:nameRaw() ~= "Evolution Sandbox" then return end
 
     local aps = pilot.get()
-    if #aps > 100 then pilot.clear(); return end
-
     -- Boundary Check
     for _, sp in ipairs(aps) do
+        -- reduce population
+        local pop = #aps
+        if pop > 20 then
+            sp:damage(pop * sp:ship():size(), 0, 10, "explosion_splash")
+        end
         if sp:pos():dist() > ARENA_RADIUS then
             local spmem = sp:memory()
             if spmem.genome then
@@ -686,14 +731,9 @@ function EVO_CHECK_SYSTEM()
     for _, p in ipairs(blues) do
         local pmem = p:memory()
         if pmem.genome ~= nil then
-            b_pow = b_pow + p:ship():size()
-        elseif p:ai() == "miner" then
-            -- give it a random genome
-           local genomes = GENOMES[FAC_BLUE]
-           pmem.genome = genomes[math.random(#genomes)].genome
-           dna_mod.apply_dna_to_pilot(p, pmem.genome)
-           -- hook it on landing (success for a miner)
-           hook.pilot(p, "land", "EVO_MINER_LANDED")
+            if pmem.score and pmem.score > 100 then
+                b_pow = b_pow + p:ship():size()
+            end
         end
     end
     for _, p in ipairs(reds) do r_pow = r_pow + p:ship():size() end
@@ -711,6 +751,14 @@ function EVO_CHECK_SYSTEM()
         elseif b_pow > 8 then spawn_warrior(FAC_RED, nil, "big")
         else spawn_warrior(FAC_RED, nil, "small") end
     end
+
+    local roll = math.random(10)
+    if roll == 1 then
+        spawn_miner(FAC_BLUE)
+    elseif roll == 2 then
+        spawn_miner(FAC_RED)
+    end
+
 
     hook.timer(3, "EVO_CHECK_SYSTEM")
 end

@@ -1,6 +1,6 @@
 <faction name="Scientific Research Conglomerate">
  <ai>mercenary</ai>
- <logo>marauder</logo>
+ <logo>miner</logo>
  <static/>
  <invisible/>
  <known/>

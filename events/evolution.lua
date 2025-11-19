@@ -7,240 +7,326 @@
 </event>
 --]]
 --[[
-
    Evolution Event
 
-   This event runs constantly in the background and manages evolution (maybe)
+   This event runs constantly in the background and manages evolution of ship genomes
+   through combat performance. Ships fight in an arena, die, get scored, and their
+   genomes are bred/mutated for the next generation.
+
+   Key improvements in this version:
+   * Efficient flat genome structure: GENOMES[f_id] = array[{genome=str, score=num, hull=str}]
+   * Automatic sorting/pruning to top 8 in pick_top_genome() (called every spawn)
+   * Duplicate detection: same genome+hull updates score if better
+   * Breeding from top pool only
+   * Random cataclysms (2% chance per spawn) keep only top 2 genomes
+   * Arena marker for visibility
+   * Champion scaffolding (TODO: implement spawning logic)
+   * Fixed VN dialogue for new structure (including "Forget")
+   * Robust save/restore
+   * Integrated score devaluing, broadcasts, hailed VN
 --]]
 local fmt           = require "format"
 local vn            = require "vn"
-local dna_mod = require "dna_modifier.dna_modifier"
--- luacheck: globals enter load EVO_CHECK_SYSTEM, EVO_DISCUSS_RESEARCH (Hook functions passed by name)
+local spark         = require "luaspfx.spark"
 
--- TODO:
--- * Add a bar NPC to get info from
--- * Trigger research
+local dna_mod       = require "dna_modifier.dna_modifier"
+-- luacheck: globals enter load EVO_CHECK_SYSTEM EVO_DISCUSS_RESEARCH EVOLVE SCORE_ATTACKED hailed
 
-function create ()
-  hook.load("load")
-  hook.enter("enter")
-end
+-- Configuration
+local MAX_GENOMES          = 8  -- Max genomes kept per faction (pruned/sorted desc score)
+local CATACLYSM_CHANCE     = 2  -- % chance per spawn to wipe to top 2 (approx every 50 spawns)
+local ARENA_RADIUS         = 5000
+local FAC_BLUE             = "Scientific Research Conglomerate"
+local FAC_RED              = "Guild of Free Traders"
 
-local evobtn
-
+-- Persistent runtime storage: f_id -> [{genome=str, score=num, hull=str}] (sorted desc)
 local GENOMES = {}
 
-local MAX_GENOMES = 8
-function pick_top_genome ( f_id, fallback_size )
-    if not fallback_size then
-        fallback_size = 100
-    end
-    local topGenome = nil
-    local topScore = -1
-    local topScorers = {}
-    if not GENOMES[f_id] then
-        GENOMES[f_id] = {}
-    end
-
-    local f_min_score = 0
-
-    for _i, t in ipairs(GENOMES[f_id]) do
-        for k, v in pairs(t) do
-            -- devalue all scores
-            v.score = math.floor(v.score * 0.99)
-            if v.score > topScore then
-                topScore = v.score
-                topGenome = k
-                local te = {}
-                te[topGenome] = { score = topScore, hull = v.hull }
-                table.insert(topScorers, te)
-            elseif v.score * 3 > topScore then
-                local te = {}
-                te[topGenome] = { score = math.floor(v.score), hull = v.hull }
-                table.insert(topScorers, te)
-            end
-        end
-    end
-    -- clean the genomes table while we're here
-    table.sort(topScorers, function(a,b)
-        for _genomeA, dataA in pairs(a) do
-            for _genomeB, dataB in pairs(b) do
-                return dataA.score > dataB.score
-            end
-        end
-    end)
-    if #topScorers > MAX_GENOMES then
-        for i = MAX_GENOMES + 1, #topScorers do
-            topScorers[i] = nil
-        end
-        local trimmed = {}
-        for i = 1, MAX_GENOMES do
-            trimmed[i] = topScorers[i]
-        end
-        topScorers = trimmed
-    end
-    GENOMES[f_id] = topScorers
-    if not mem.evolution[f_id] then 
-        mem.evolution[f_id] = {}
-    end
-    -- save our top genomes into the memory
-    if #topScorers > 3 then
-        print(fmt.f("saving {num} genomes for {fac} (high score: {score})", {score = topScore, num = #topScorers, fac = f_id}))
-        local me = mem.evolution[f_id]
-        me.genomes = topScorers
-        mem.evolution[f_id] = me
-        evt.save()
-    end
-    return topGenome or dna_mod.generate_junk_dna(fallback_size)
-end
-
-local function get_genome( fac, default_size )
-    if not default_size then
-        default_size = 100
-    end
-    local genome = pick_top_genome( fac, default_size )
-    local genome_candidates = {}
-    local mut_rate = math.random(6) * 0.01 + 0.005
-    if #GENOMES[fac] > 2 then
-        for _i, te in ipairs(GENOMES[fac]) do
-            for genome, _score in pairs(te) do
-                table.insert(genome_candidates, dna_mod.mutate_random(genome, mut_rate))
-            end
-        end
-    else
-        table.insert(genome_candidates, dna_mod.mutate_random(genome, 0.06))
-        table.insert(genome_candidates, dna_mod.mutate_random(genome, 0.22))
-    end
-    local bred_genome = dna_mod.breed(genome_candidates, 0.05)
-    table.insert(genome_candidates, bred_genome)
-
-    return genome_candidates[math.random(#genome_candidates)]
-end
-
-function SCORE_ATTACKED ( receiver, attacker, amount )
-   local pmem = receiver:memory() 
-   local amem = attacker:memory()
-   if not pmem.score then
-        pmem.score = amount
-   end
-   if not amem.score then
-       -- initial score based on alpha strike
-       amem.score = amount * 10 
-   end
-    pmem.score = math.floor(math.max(pmem.score, amount + pmem.score * 0.1))
-    amem.score = math.floor((amem.score * 0.95) + (amount * 3.75))
-end
-
+-- Spawns
 local SPAWN_SHIPS = {
     "Llama", "Quicksilver", "Shark", "Hyena", "Pirate Hyena", "Ancestor", "Gawain",
     "Phalanx", "Admonisher", "Vigilance", "Gawain", "Pirate Shark", "Empire Shark",
-    "Bedivere", "Tristan",
-    "Goddard Merchantman", "Hawking"
+    "Bedivere", "Tristan", "Goddard Merchantman", "Hawking", "Rhino", "Mule",
+    "Zebra", "Plowshare"
 }
 
-local SPAWN_SHIP = "Hyena"
+local SMALL_SPAWN_SHIPS = {
+    "Llama", "Quicksilver", "Shark", "Hyena", "Pirate Hyena", "Ancestor", "Gawain",
+    "Gawain", "Empire Shark", "Pirate Shark", "Tristan"
+}
 
-local function determine_genome_size( fac )
-    local val = 128
-    if fac:find("Research") then
-        val = 256
-    elseif fac:find("Guild") then
-        val = 128
+local BIG_SPAWN_SHIPS = {
+    "Phalanx", "Admonisher", "Vigilance", "Hawking", "Goddard Merchantman",
+    "Dvaered Phalanx", "Pirate Phalanx", "Kestrel"
+}
+
+local SPAWN_SHIP = "Llama"
+
+function create()
+    hook.load("load")
+    hook.enter("enter")
+end
+
+-- Picks the top genome, prunes/sorts to top MAX_GENOMES, saves to mem
+-- Called every spawn -> frequent pruning without overkill
+function pick_top_genome(f_id, fallback_size)
+    if not fallback_size then fallback_size = 100 end
+    if not GENOMES[f_id] then GENOMES[f_id] = {} end
+
+    local list = GENOMES[f_id]
+    local topGenome, topScore = nil, -1
+    local f_min_score = 0
+
+    -- Devalue all scores slightly (favor recent performance)
+    for _, entry in ipairs(list) do
+        entry.score = math.floor(entry.score * 0.99)
     end
-    
+
+    -- Find absolute top genome
+    for _, entry in ipairs(list) do
+        if entry.score > topScore then
+            topScore = entry.score
+            topGenome = entry.genome
+        end
+    end
+
+    if not topGenome then
+        return dna_mod.generate_junk_dna(fallback_size)
+    end
+
+    -- Build sorted top list (copy + sort desc)
+    local topScorers = {}
+    for _, entry in ipairs(list) do
+        -- Include high performers (original logic adapted)
+        if entry.score > topScore or entry.score * 3 > topScore then
+            table.insert(topScorers, {
+                genome = entry.genome,
+                score  = entry.score,
+                hull   = entry.hull
+            })
+        end
+    end
+    table.sort(topScorers, function(a, b) return a.score > b.score end)
+
+    -- Trim to MAX_GENOMES
+    while #topScorers > MAX_GENOMES do
+        table.remove(topScorers)
+    end
+
+    -- Cataclysm: random wipe to top 2 (shake up evolution, prevent stagnation)
+    if math.random(100) < CATACLYSM_CHANCE then
+        print(fmt.f("CATACLYSM for {f}! Keeping top 2 genomes.", {f = f_id}))
+        topScorers = { topScorers[1], topScorers[2] }
+    end
+
+    -- Update runtime
+    GENOMES[f_id] = topScorers
+
+    -- Save to mem
+    if not mem.evolution then mem.evolution = {} end
+    mem.evolution[f_id] = mem.evolution[f_id] or {}
+    mem.evolution[f_id].genomes = topScorers
+    evt.save(true)
+
+    print(fmt.f("saving {num} genomes for {fac} (high score: {score})", {score = topScore, num = #topScorers, fac = f_id}))
+
+    return topGenome
+end
+
+-- Gets a new genome by mutating/breeding from top pool
+function get_genome(fac, default_size)
+    if not default_size then default_size = 100 end
+    local genome = pick_top_genome(fac, default_size)  -- Prunes as side effect
+    local candidates = {}
+    local mut_rate = math.random(6) * 0.01 + 0.005
+    local genomes = GENOMES[fac] or {}
+
+    local pool_size = math.min(8, #genomes)
+    if pool_size > 2 then
+        -- Mutate top pool
+        for i = 1, pool_size do
+            table.insert(candidates, dna_mod.mutate_random(genomes[i].genome, mut_rate))
+        end
+    else
+        -- Fallback mutations
+        table.insert(candidates, dna_mod.mutate_random(genome, 0.06))
+        table.insert(candidates, dna_mod.mutate_random(genome, 0.22))
+    end
+
+    -- Breed and add
+    local bred_genome = dna_mod.breed(candidates, 0.05)
+    table.insert(candidates, bred_genome)
+
+    return candidates[math.random(#candidates)]
+end
+
+-- Scores damage: defender loses score, attacker gains
+function SCORE_ATTACKED(receiver, attacker, amount)
+    local pmem = receiver:memory()
+    local amem = attacker:memory()
+    if not pmem.score then pmem.score = amount end
+    if not amem.score then amem.score = amount * 10 end
+    pmem.score = math.floor(math.max(pmem.score, amount + pmem.score * 0.1))
+    amem.score = math.floor((amem.score * 0.99) + (amount * 3.75 / attacker:ship():size()))
+    local sz_diff = receiver:ship():size() - attacker:ship():size()
+    -- underdog bonus
+    if sz_diff > 0 then
+        amem.score = amem.score + math.floor(amount * sz_diff * attacker:ship():size() / 2)
+    end
+end
+
+local function determine_genome_size(fac)
+    local val = 128
+    if fac:find("Research") then val = 256 end
+    if fac:find("Guild") then val = 128 end
     return val
 end
 
-local function spawn_warrior ( fac, hull )
-    if not hull then
-        hull = SPAWN_SHIP
-    end
+-- Spawns a basic warrior
+function spawn_warrior(fac, hull)
+    if not hull then hull = SPAWN_SHIP end
     local sp = pilot.add(hull, fac, nil)
     local smem = sp:memory()
-    smem.genome = get_genome( fac, determine_genome_size( fac ) )
-    if math.random(3) == 1 then
-        -- stubborn warrior
-        smem.norun = true
-    end
-    
-    dna_mod.apply_dna_to_pilot(sp, smem.genome)
+    smem.genome = get_genome(fac, determine_genome_size(fac))
+    if math.random(3) == 1 then smem.norun = true end
 
+    dna_mod.apply_dna_to_pilot(sp, smem.genome)
     hook.pilot(sp, "death", "EVOLVE")
     hook.pilot(sp, "attacked", "SCORE_ATTACKED")
     hook.pilot(sp, "hail", "hailed")
 
-    -- special stuff
     sp:setNoDisable(true)
     sp:setNoLand(true)
     sp:setNoJump(true)
+
+    return sp
 end
 
--- TODO: Make the pilot broadcast a message with his score
-function EVOLVE ( dead_pilot, killer, _last_genome )
+function CHAMP_ATTACKED ( champ, attacker, amount )
+    for _=  1, math.random(3) do
+        spark( champ:pos(),
+            vec2.new(math.random(-1, 1), math.random(-1, 1)),
+            champ:ship():size() * 5,
+            nil,
+            { silent=true }
+        )
+    end
+    local amem = attacker:memory()
+    if amem.score then
+        amem.score = amem.score + amount
+    end
+end
+
+-- TODO: Scaffolding for champion spawns (call from EVO_CHECK_SYSTEM when ready)
+local function spawn_champion(fac)
+    -- Get top genome
+    local genomes = GENOMES[fac]
+    if not genomes or #genomes == 0 then return end
+    local top = genomes[1]
+
+    -- TODO: Decide hull based on score/threshold
+    -- local hull = (top.score > 5000) and "Ancestor" or "Phalanx"
+    -- spawn_warrior(fac, hull, true)  -- champion=true for special AI?
+
+    local hull = top.hull
+
+    local champ = spawn_warrior(fac, hull)
+    hook.pilot(champ, "attacked", "CHAMP_ATTACKED")
+
+    print(fmt.f("Champion ready for {f}: {score} on {g} in {h}", {
+        f = fac, score = top.score, g = string.sub(top.genome, 1, 8), h = hull
+    }))
+    champ:broadcast("Watch out, here I come!")
+end
+
+-- Evolution trigger: on death, record genome performance
+function EVOLVE(dead_pilot, killer)
     local dmem = dead_pilot:memory()
     local score = dmem.score or 0
     local f_id = dead_pilot:faction():nameRaw()
-    last_genome = dmem.genome
+    local genome = dmem.genome
+    local hull = dead_pilot:ship():nameRaw()
+    local final_score = math.floor(score)
 
-    if GENOMES[f_id] == nil then
-        GENOMES[f_id] = {}
+    dead_pilot:broadcast(fmt.f("I died with a score of {v}", {v = final_score}))
+
+    if not GENOMES[f_id] then GENOMES[f_id] = {} end
+
+    -- Dedupe: update existing if same genome+hull and better score
+    local updated = false
+    for _, entry in ipairs(GENOMES[f_id]) do
+        if entry.genome == genome and entry.hull == hull then
+            if final_score > entry.score then
+                entry.score = final_score
+                print(fmt.f("Updated {f} {g}: {old} -> {new}", {
+                    f = f_id, g = string.sub(genome, 1, 8),
+                    old = entry.score, new = final_score
+                }))
+            end
+            updated = true
+            break
+        end
     end
 
-    local table_entry = {}
-    local final_score = math.floor(score / dead_pilot:ship():size())
-    dead_pilot:broadcast(fmt.f("I died with a score of {v}", {v = final_score} ))
-    table_entry[last_genome] = { score = final_score, hull = dead_pilot:ship():nameRaw() }
-    table.insert(GENOMES[f_id], table_entry)
---  print(fmt.f("Genome for {fac} scored at {score}", {fac=f_id, score=score}))
-    -- reset or reward killer here
-    if killer ~= nil and type(killer) ~= "string" then
+    -- Insert new
+    if not updated then
+        table.insert(GENOMES[f_id], {
+            genome = genome,
+            score  = final_score,
+            hull   = hull
+        })
+--      print(fmt.f("New genome for {f}: {s} on {h} ({g})", {
+--          f = f_id, s = final_score, h = hull,
+--          g = string.sub(genome, 1, 8)
+--      }))
+    end
+
+    -- Reward killer
+    if killer and type(killer) ~= "string" then
         killer:addHealth(20, 50)
         killer:effectClear(false, false, false)
         local kmem = killer:memory()
-        if kmem.score == nil then
-            kmem.score = score * 0.3 -- inherit some of victim's score
-        end
+        if not kmem.score then kmem.score = score * 0.3 end
         local kill_bonus = 200 * dead_pilot:ship():size()
-        kmem.score = math.floor(kmem.score + kill_bonus + final_score * 0.3) -- score bonus for final blow
---      print(fmt.f("Attacker ({fac}) has a score of {score}", {score=kmem.score, fac=killer:faction()}))
+        kmem.score = math.floor(kmem.score + kill_bonus + final_score * 0.3)
         killer:broadcast(fmt.f("I have {v} points now!", {v=kmem.score}))
-        -- save killer genome too
-        if kmem.genome ~= nil then
-            local winner_entry = {}
-            winner_entry[kmem.genome] = { score = kmem.score, hull = killer:ship():nameRaw() }
-            table.insert(GENOMES[killer:faction():nameRaw()], winner_entry)
+
+        -- Save killer genome too (with dedupe)
+        local k_f_id = killer:faction():nameRaw()
+        if kmem.genome then
+            if not GENOMES[k_f_id] then GENOMES[k_f_id] = {} end
+            local k_updated = false
+            for _, entry in ipairs(GENOMES[k_f_id]) do
+                if entry.genome == kmem.genome and entry.hull == killer:ship():nameRaw() then
+                    if kmem.score > entry.score then
+                        entry.score = kmem.score
+                    end
+                    k_updated = true
+                    break
+                end
+            end
+            if not k_updated then
+                table.insert(GENOMES[k_f_id], {
+                    genome = kmem.genome,
+                    score  = kmem.score,
+                    hull   = killer:ship():nameRaw()
+                })
+            end
         end
     end
 
-    -- spawn replacement pilot
---  spawn_warrior( f_id )
-
-    -- change the next spawn ship?
+    -- Rare hull upgrade
     if math.random(5) == 1 then
         SPAWN_SHIP = SPAWN_SHIPS[math.random(#SPAWN_SHIPS)]
+        if ship.get(SPAWN_SHIP):size() > 3 and math.random(5) > 1 then
+            SPAWN_SHIP = SMALL_SPAWN_SHIPS[math.random(#SMALL_SPAWN_SHIPS)]
+        end
     end
 end
 
-local function get_codon_infostr ( genome )
-    local msg = "Winner codons:"
-    local codons = dna_mod.enumerate_codons(genome)
-    for _, codon in ipairs(codons) do
-        msg = msg .. "\n" .. tostring(codon)
-    end
-    local mods = dna_mod.decode_dna(genome)
-    for attribute, value in pairs(mods) do
-        msg = msg .. tostring(fmt.f("\n{attr}: {val}", {attr = attribute, val = value} ))
-    end
-    return msg
-end
-
-local FAC_BLUE = "Scientific Research Conglomerate"
-local FAC_RED = "Guild of Free Traders"
-
-
-function display_info ()
+-- Debug display (info button)
+function display_info()
     local cur = system.cur()
-
     if cur:nameRaw() ~= "Evolution Sandbox" then
         player.teleport("Evolution Sandbox")
     else
@@ -248,53 +334,43 @@ function display_info ()
     end
 
     print("++GENOMES++")
-    for fac, sb in pairs(GENOMES) do
-        for _i, te in pairs(sb) do
-            for genome, v in pairs(te) do
-                local msg = ""
-                local codons = dna_mod.enumerate_codons(genome)
-                for _, codon in ipairs(codons) do
-                    msg = msg .. ", " .. tostring(codon)
-                end
-                local mods = dna_mod.decode_dna(genome)
-                for attribute, value in pairs(mods) do
-                    msg = msg .. tostring(fmt.f("\n{attr}: {val}", {attr = attribute, val = value} ))
-                end
-                print(fmt.f("({f}) {v}: {m}", {m=msg,v=v,f=fac}))
+    for fac, genomes in pairs(GENOMES) do
+        for i, entry in ipairs(genomes) do
+            local msg = ""
+            local codons = dna_mod.enumerate_codons(entry.genome)
+            for _, codon in ipairs(codons) do
+                msg = msg .. ", " .. tostring(codon)
             end
+            local mods = dna_mod.decode_dna(entry.genome)
+            for attribute, value in pairs(mods) do
+                msg = msg .. tostring(fmt.f("\n{attr}: {val}", {attr = attribute, val = value} ))
+            end
+            print(fmt.f("({f}) {v}: {m}", {m=msg,v=entry,fac=fac}))
         end
     end
     print("--GENOMES--")
 end
 
--- NOTE: Don't use this!
-function TEST_RELOAD()
-    for i = 0, 1000, 1 do
-        local suc = hook.rm(i)
-        print(tostring(i) .. " " .. tostring(suc))
-    end
-end
-
-function load ()
-    -- initial setup and restoration
+-- Load/restore genomes from mem
+function load()
     if not mem.evolution then
         print("mem.evolution not initialized")
         mem.evolution = {}
     else
         for f_id, evo_table in pairs(mem.evolution) do
-            if evo_table.genomes ~= nil and #evo_table.genomes > 0 then
-                GENOMES[f_id] = evo_table.genomes
-                print(fmt.f("restored {d} genomes for {f}", {f=f_id, d=#evo_table.genomes}))
+            local genomes = evo_table.genomes
+            if genomes and #genomes > 0 then
+                GENOMES[f_id] = genomes
+                print(fmt.f("restored {d} genomes for {f}", {f = f_id, d = #genomes}))
             else
-                print("Didn't restore any genomes for " .. tostring(f_id))
+                print("No genomes restored for " .. tostring(f_id))
                 GENOMES[f_id] = {}
             end
         end
     end
 
-    evobtn = player.infoButtonRegister( _("Evolution"), display_info, 3 )
-    -- we always load while landed, run the handler
-    land()
+    evobtn = player.infoButtonRegister(_("Evolution"), display_info, 3)
+    land()  -- Setup NPCs if landed in sandbox
 end
 
 function npc_success( p )
@@ -306,77 +382,71 @@ local function spawn_npc ()
     -- ai/core/idle/miner.lua
 end
 
--- timer helper that checks if the player is still simulating
+-- Arena control loop
 function EVO_CHECK_SYSTEM()
     local cur = system.cur()
-    if cur:nameRaw() ~= "Evolution Sandbox" then
-        -- not in the evo system
-        return
-    end
+    if cur:nameRaw() ~= "Evolution Sandbox" then return end
 
-    -- enforce a boundary
-    for _i, sp in pairs(pilot.get()) do
-        local excess = sp:pos():dist() - 5000
+    -- Enforce boundary (user requested: keep damage-only)
+    for _, sp in ipairs(pilot.get()) do
+        local excess = sp:pos():dist() - ARENA_RADIUS
         if excess > 0 then
-            sp:damage(excess * 0.1, 0, 10, "explosion_splash")
-            local smem = sp:memory()
-            smem.norun = true
-            smem.aggressive = true
+            spark( sp:pos(), sp:vel()*-0.5, sp:ship():size() * 6, nil, {} )
+            if sp:memory().genome ~= nil then
+                sp:damage(excess * 0.1, 0, 10, "explosion_splash")
+                local smem = sp:memory()
+                smem.norun = true
+                smem.aggressive = true
+            end
         end
     end
-    
-    -- check if each faction has pilots
+
+    -- Balance factions by ship power
     local blues = pilot.get(faction.get(FAC_BLUE))
     local reds = pilot.get(faction.get(FAC_RED))
-    --
-    -- calculate the power
-    local blue_power = 0
-    local red_power = 0
+    local blue_power, red_power = 0, 0
+    for _, bp in ipairs(blues) do blue_power = blue_power + bp:ship():size() end
+    for _, rp in ipairs(reds) do red_power = red_power + rp:ship():size() end
 
-    for _, bp in pairs(blues) do
-        blue_power = blue_power + bp:ship():size()
+    -- Spawn replacements
+    if not blues or #blues == 0 or (math.random(4) == 1 and blue_power < 5) then
+        if math.random(8) == 4 then
+            spawn_champion(FAC_BLUE)
+        elseif red_power > 3 then
+            spawn_warrior(FAC_BLUE, BIG_SPAWN_SHIPS[math.random(#BIG_SPAWN_SHIPS)])
+        else
+            spawn_warrior(FAC_BLUE)
+        end
     end
-    for _, rp in pairs(reds) do
-        red_power = red_power + rp:ship():size()
+    if not reds or #reds == 0 or (math.random(4) == 1 and red_power < 5) then
+        if math.random(8) == 4 then
+            spawn_champion(FAC_RED)
+        elseif blue_power > 3 then
+            spawn_warrior(FAC_RED, BIG_SPAWN_SHIPS[math.random(#BIG_SPAWN_SHIPS)])
+        else
+            spawn_warrior(FAC_RED)
+        end
     end
 
-    -- replace lost pilots and randomly spawn more
-    if not blues or #blues == 0 or math.random(4) == 1 and blue_power < 5 then
-        spawn_warrior(FAC_BLUE)
-    end
-
-    if not reds or #reds == 0 or math.random(4) == 1 and red_power < 5 then
-        spawn_warrior(FAC_RED)
-    end
-
-    -- reschedule the control loop
     hook.timer(3, "EVO_CHECK_SYSTEM")
 end
 
-function EVO_DISCUSS_RESEARCH ()
-    -- first, we figure out where we are
-    local spob, _ = spob.cur()
+-- NPC: Genome research discussion
+function EVO_DISCUSS_RESEARCH()
+    local spob = spob.cur()
     local fac = spob:faction():nameRaw()
-    -- now we will get information about this faction's genome
-    local fac_genomes = GENOMES[fac]
---  print(fmt.f("Probing {fac} for genomes...", {fac=fac}))
---  print(fmt.f("found {d} genomes for {f}", {d=#fac_genomes, f=fac}))
-    local choices = {}
-    for index, g_info in pairs(fac_genomes) do
-        for genome, info in pairs(g_info) do
---          print(fmt.f("Genome {i}: {g}", {i=index, g=genome}))
---          for k,v in pairs(info) do
---              print(fmt.f("{k}: {v}",{k=k,v=v}))
---          end
-            local label = fmt.f(
-                "({score}) {strep} ({hull})",
-                {score = info.score, hull = info.hull, strep = string.sub(genome, 1, 8)}
-            )
-            table.insert(choices, { label, tostring(index) })
-        end
-    end
+    local fac_genomes = GENOMES[fac] or {}
 
-    table.insert(choices, { "Nevermind", "end" } )
+    local choices = {}
+    for index, entry in ipairs(fac_genomes) do
+        local label = fmt.f("({score}) {strep} ({hull})", {
+            score = entry.score,
+            hull  = entry.hull,
+            strep = string.sub(entry.genome, 1, 8)
+        })
+        table.insert(choices, {label, tostring(index)})
+    end
+    table.insert(choices, { "Nevermind", "end" })
 
     local msg = nil
     local choice_id = nil
@@ -384,73 +454,68 @@ function EVO_DISCUSS_RESEARCH ()
     vn.scene()
     local scientist = vn.newCharacter("Station Scientist", {image = "zalek3.webp"})
     vn.transition()
-    scientist(fmt.f("We are currently keeping track of {num} genomes. Want to inspect them?", {num=#fac_genomes}))
-    vn.menu( choices )
-    for _i, choice in pairs(choices) do
-        local gindex = tostring(choice[2])
-        if tonumber(gindex) ~= nil then
+    scientist(fmt.f("We are currently keeping track of {num} genomes. Want to inspect them?", {num = #fac_genomes}))
+    vn.menu(choices)
+
+    for _, choice in ipairs(choices) do
+        local gindex = choice[2]
+        if tonumber(gindex) then
             vn.label(gindex)
-            vn.func( function()
---              print("YOU HAVE SELECTED GENOME NUMBER " .. tostring(gindex))
-                local choice_id = gindex
-                -- do something with genome
-                local g_entry = fac_genomes[tonumber(gindex)]
-                local genome = ""
-                local g_info = nil
-                for gnm, v in pairs(g_entry) do 
-                    genome = gnm
-                    g_info = v
-                end
---              print(genome)
-                msg = fmt.f("{g} scored {s} on {h}", {g=string.sub(genome, 1, 16), s=g_info.score, h=g_info.hull})
+            vn.func(function()
+                choice_id = tonumber(gindex)
+                local entry = fac_genomes[choice_id]
+                if not entry then return end
+
+                local genome = entry.genome
+                msg = fmt.f("{g} scored {s} on {h}", {
+                    g = string.sub(genome, 1, 16),
+                    s = entry.score,
+                    h = entry.hull
+                })
                 local codons = dna_mod.enumerate_codons(genome)
                 for _, codon in ipairs(codons) do
                     msg = msg .. ", " .. tostring(codon)
                 end
                 local mods = dna_mod.decode_dna(genome)
                 for attribute, value in pairs(mods) do
-                    msg = msg .. tostring(fmt.f("\n{attr}: {val}", {attr = attribute, val = value} ))
+                    msg = msg .. fmt.f("\n{attr}: {val}", {attr = attribute, val = value})
                 end
---              print(msg)
-            end )
+            end)
             vn.jump("speak_msg")
         end
     end
 
     vn.label("speak_msg")
-    scientist( function() return msg end )
+    scientist(function() return msg end)
     local affect_choices = {
+        { "Irradiate", "irradiate" },
         { "Forget", "delete" },
         { "Cancel", "end" }
     }
     vn.menu(affect_choices)
-    -- affect this genome?
+    vn.label("irradiate")
+    scientist("The available mutagens to target are:\nterminator, defense, propulsion, weaponry, utility\nNote that the purpose of radiation research is to neutralize the target mutagen.")
+    vn.func(function()
+        local entry = fac_genomes[choice_id]
+        if not entry then return end
+        local genome = entry.genome
+        local target_mutagen = tk.input("Radiation Target", 4, 16, "mutagen type")
+        local researched_genome = dna_mod.research_irradiate(entry.genome, target_mutagen)
+        table.insert(fac_genomes, {
+            genome = dna_mod.mutate_random(researched_genome, 0.01),
+            score  = entry.score,
+            hull   = entry.hull
+        })
+    end)
+    -- intentional fallthrough to remove original
     vn.label("delete")
-    vn.func( function ()
+    vn.func(function()
         table.remove(fac_genomes, choice_id)
-    end )
+    end)
     vn.label("end")
-    scientist( "Alright, see you later." )
+    scientist("Alright, see you later.")
     vn.done()
     vn.run()
-
---  for fac, sb in pairs(GENOMES) do
---      for _i, te in pairs(sb) do
---          for genome, v in pairs(te) do
---              local msg = ""
---              local codons = dna_mod.enumerate_codons(genome)
---              for _, codon in ipairs(codons) do
---                  msg = msg .. ", " .. tostring(codon)
---              end
---              local mods = dna_mod.decode_dna(genome)
---              for attribute, value in pairs(mods) do
---                  msg = msg .. tostring(fmt.f("\n{attr}: {val}", {attr = attribute, val = value} ))
---              end
---              print(fmt.f("({f}) {v}: {m}", {m=msg,v=v,f=fac}))
---          end
---      end
---  end
---  print("--GENOMES--")
 end
 
 local function createNpcs()
@@ -459,64 +524,56 @@ local function createNpcs()
         _("Station Scientist"),
         "zalek3.webp",
         "Talk to this scientist to interact with the evolution plugin.",
-        3,
-        nil
+        3
     )
-    print("created an NPC with ID "..tostring(id))
+    print("Created NPC ID " .. tostring(id))
 end
 
-function hailed( receiver )
+-- Hail response: show mods and score in VN
+function hailed(receiver)
     local rmem = receiver:memory()
-    local msg = "My genome provides the following modifications:"
-    mods = dna_mod.decode_dna(rmem.genome)
+    local msg = fmt.f("My genome ({g}) provides the following modifications:", {g = string.sub(rmem.genome, 1, 8)})
+    local mods = dna_mod.decode_dna(rmem.genome)
     for attribute, value in pairs(mods) do
         msg = msg .. fmt.f("\n{attr}: {val}", {attr=attribute, val=value})
     end
     msg = msg .. "\nMy current score is " .. tostring(rmem.score)
 
-    -- build the message TODO
     vn.clear()
     vn.scene()
     vn.transition()
     vn.na(msg)
     vn.run()
-    -- close the comm
     player.commClose()
 end
 
 function land()
-    -- check if we are in the right place or if we need to nuke this hook
     local cur = system.cur()
     if cur:nameRaw() ~= "Evolution Sandbox" then
-        if mem.evolution_data.lhook ~= nil then
-            hook.rm(mem.evolution.lhook)
-            mem.evolution.lhook = nil
+        -- Cleanup hooks/markers
+        if mem.evolution_data and mem.evolution_data.lhook then
+            hook.rm(mem.evolution_data.lhook)
+            mem.evolution_data.lhook = nil
+        end
+        if mem.evolution_data and mem.evolution_data.marker then
+            system.markerRm(mem.evolution_data.marker)
+            mem.evolution_data.marker = nil
         end
         return
     end
-    -- we're in the right place, make the NPC
     createNpcs()
 end
 
-function enter ()
-    -- Check if we're in the right system
+function enter()
     local cur = system.cur()
-    if cur:nameRaw() ~= "Evolution Sandbox" then
-        -- not in the evo system
-        return
-    end
-    -- for each station in the system:
-    --   pick a mission at random -> spawn a ship for scoring
-    --   use pilot.add( "shipname", "stringfaction", "spob", "pilotname", {params} )
-    -- for now: just start the fighting
---    spawn_enemies()
+    if cur:nameRaw() ~= "Evolution Sandbox" then return end
+
+    print("ENTER: Evolution Sandbox activated")
     spawn_warrior(FAC_BLUE)
     spawn_warrior(FAC_RED)
-
     hook.timer(3, "EVO_CHECK_SYSTEM")
-    if not mem.evolution_data then
-        mem.evolution_data = {}
-    end
+
+    if not mem.evolution_data then mem.evolution_data = {} end
     if not mem.evolution_data.lhook then
         mem.evolution_data.lhook = hook.land("land")
     end

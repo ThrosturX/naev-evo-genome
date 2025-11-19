@@ -1,5 +1,5 @@
 <spob name="Red Station">
- <lua>evolve.lua</lua>
+ <lua>evolve.lua</lua
  <pos x="-1400.0" y="-500.0"/>
  <GFX>
   <space>station-commerce4</space>

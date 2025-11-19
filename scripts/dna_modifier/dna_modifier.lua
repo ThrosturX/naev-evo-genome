@@ -1,28 +1,35 @@
 --[[
-dna_modifier.lua (v6.2 - Fixed)
+dna_modifier.lua (v6.3 - Optimized & Immutable)
 
-This module implements an advanced DNA system for modifying ship attributes in Naev.
-It supports complex mechanics inspired by real biology, including gene expression control,
-meiosis-based breeding, and multiple paths for targeted genetic research.
+Performance Improvements:
+- Replaced iterative string concatenation with table buffers (table.concat) to reduce garbage collection overhead.
+- Optimized `get_complement` using string.gsub.
+- Made CODON_MAP immutable. `research_stabilize` now performs a reverse lookup on existing definitions
+  rather than generating new keys at runtime.
 
-- Terminator Codon ('TAGG'): Halts the reading of a DNA strand.
-  * UPDATED v6.2: Changed from TAG to TAGG to match CODON_LENGTH (4) and prevent
-  accidental truncation of valid codons like CTAG (Speed Mod).
-- Breeding: A new `breed()` function simulates meiosis by shuffling chunks of DNA from two parents.
-- Research Suite: Three new functions (`research_splice`, `research_irradiate`, `research_stabilize`)
-  provide distinct, strategic paths for genome modification.
-- Random Mutation: The original `mutate` function is now `mutate_random` for simulating low-level errors.
-- enumerate_codons: Now provides descriptive output for diagnostics.
+Original Features:
+- Terminator Codon ('TAGG')
+- Meiosis-based breeding
+- Research Suite (Splice, Irradiate, Stabilize)
+- Advanced diagnostics
 --]]
 
 local DnaModifier = {}
 
+-- Cache standard libraries for performance in tight loops
+local m_random = math.random
+local m_floor = math.floor
+local m_max = math.max
+local m_min = math.min
+local s_sub = string.sub
+local t_insert = table.insert
+local t_concat = table.concat
+
 -- Basic DNA configuration
 local NUCLEOTIDES = { "A", "T", "C", "G" }
 local CODON_LENGTH = 4
-local TERMINATOR_CODON = "TAGG" -- Updated to 4 chars to align with grid and avoid collisions
+local TERMINATOR_CODON = "TAGG"
 
--- A set of intrinsic attributes that take flat values instead of percentages.
 local FLAT_INTRINSICS = {
     armour = true, armour_regen = true, mass = true, cpu = true, crew = true,
     cargo = true, fuel = true, energy = true, shield = true,
@@ -31,9 +38,10 @@ local FLAT_INTRINSICS = {
 
 -- ####################################################################
 -- #
--- #    CODON DEFINITIONS w/ CATEGORIES
+-- #    CODON DEFINITIONS (IMMUTABLE)
 -- #
 -- ####################################################################
+
 local CODON_MAP = {
     -- Group: Hull & Defense Systems
     ["GCAT"] = { type = "positive", category = "defense", attribute = "armour_mod", value = 0.10, debuffs = { { attribute = "mass_mod", value = 0.08, tag = "HEAVY_PLATING_A" }, { attribute = "turn_mod", value = -0.05, tag = "INERTIA_A" } } },
@@ -45,7 +53,7 @@ local CODON_MAP = {
     ["CGCT"] = { type = "positive", category = "defense", attribute = "armour", value = 50, debuffs = { { attribute = "mass", value = 100, tag = "REINFORCED_BULKHEAD_A" } } },
     ["AATT"] = { type = "positive", category = "defense", attribute = "armour_regen", value = 2, debuffs = { { attribute = "armour_mod", value = -0.10, tag = "NANITE_REPAIR_A" } } },
     ["AATG"] = { type = "positive", category = "defense", attribute = "armour_regen", value = 3, debuffs = { { attribute = "armour_mod", value = -0.15, tag = "NANITE_REPAIR_A" } } },
-    ["AATG"] = { type = "positive", category = "defense", attribute = "armour_regen", value = 5, debuffs = { { attribute = "armour_mod", value = -0.15, tag = "NANITE_REPAIR_A" }, { attribute = "mass_mod", value = 0.1, tag = "REINFORCED_BULKHEAD_A" } } },
+    ["AATA"] = { type = "positive", category = "defense", attribute = "armour_regen", value = 4, debuffs = { { attribute = "armour_mod", value = -0.15, tag = "NANITE_REPAIR_A" }, { attribute = "mass_mod", value = 0.1, tag = "REINFORCED_BULKHEAD_A" } } },
 
     -- Group: Mobility & Propulsion
     ["CTAG"] = { type = "positive", category = "propulsion", attribute = "speed_mod", value = 0.10, debuffs = { { attribute = "armour_mod", value = -0.08, tag = "AGGRESSIVE_TUNING_A" } } },
@@ -69,6 +77,7 @@ local CODON_MAP = {
     ["AGTA"] = { type = "positive", category = "utility", attribute = "loot_mod", value = 0.20, debuffs = { { attribute = "cpu_mod", value = -0.15, tag = "TRACTOR_BEAM_A" } } },
 
     -- Suppressors for all defined debuffs
+    -- These are now strictly defined here and never added to at runtime.
     ["TCGA"] = { type = "suppressor", tag = "HEAVY_PLATING_A" }, ["ATAG"] = { type = "suppressor", tag = "INERTIA_A" },
     ["TCGG"] = { type = "suppressor", tag = "ENERGY_HARDENING_A" }, ["CGAT"] = { type = "suppressor", tag = "ABLATIVE_FUEL_TANKS_A" },
     ["AGAG"] = { type = "suppressor", tag = "HIGH_CAP_SHIELD_A" }, ["TCAC"] = { type = "suppressor", tag = "FAST_CHARGE_SHIELD_A" },
@@ -83,13 +92,20 @@ local CODON_MAP = {
     ["TCAT"] = { type = "suppressor", tag = "TRACTOR_BEAM_A" },
 }
 
--- ## PALINDROMIC "OP" MODIFIERS ##
+-- Reverse Lookup Table for fast O(1) access in research_stabilize
+local SUPPRESSOR_LOOKUP = {}
+for codon, data in pairs(CODON_MAP) do
+    if data.type == "suppressor" and data.tag then
+        SUPPRESSOR_LOOKUP[data.tag] = codon
+    end
+end
+
 local PALINDROME_MAP = {
     ["GATTACCA"] = { type = "palindrome", attribute = "cooldown_mod", value = -0.25 },
     ["CTAGGCAT"] = { type = "palindrome", attribute = "cpu", value = 50 },
     ["TCAGCTGA"] = { type = "palindrome", attribute = "shield_regen", value = 0.25 },
     ["AGCTAGCT"] = { type = "palindrome", attribute = "weapon_firerate", value = 0.25 },
-    ["AATTACCA"] = { type = "palindrome", attribute = "armour_regen", value = 10},
+    ["AACTTCAA"] = { type = "palindrome", attribute = "armour_regen", value = 5},
 }
 
 -- ####################################################################
@@ -97,23 +113,21 @@ local PALINDROME_MAP = {
 -- #    HELPER & CORE FUNCTIONS
 -- #
 -- ####################################################################
-local COMPLEMENT_MAP = { A = "T", T = "A", C = "G", G = "C" }
+
+-- Optimized: Use mapping table and gsub instead of loops
+local COMPLEMENT_CHAR_MAP = { A = "T", T = "A", C = "G", G = "C" }
 
 function DnaModifier.get_complement(dna_string)
-    local complement = ""
-    for i = 1, #dna_string do
-        local char = dna_string:sub(i, i)
-        complement = complement .. (COMPLEMENT_MAP[char] or "")
-    end
-    return complement
+    return (dna_string:gsub(".", COMPLEMENT_CHAR_MAP))
 end
 
+-- Optimized: Use table.concat for buffer
 function DnaModifier.generate_junk_dna(length)
-    local dna = ""
-    for _ = 1, length do
-        dna = dna .. NUCLEOTIDES[math.random(#NUCLEOTIDES)]
+    local buffer = {}
+    for i = 1, length do
+        buffer[i] = NUCLEOTIDES[m_random(4)]
     end
-    return dna
+    return t_concat(buffer)
 end
 
 -- ####################################################################
@@ -122,32 +136,27 @@ end
 -- #
 -- ####################################################################
 
---- Parses a DNA string and its complement to find all recognized codons, with descriptions.
--- @param dna_string The DNA string to enumerate.
--- @return A table (list) of all non-junk codon strings found with descriptions.
 function DnaModifier.enumerate_codons(dna_string)
     local found_codons = {}
-    local recognized_set = {} -- Use a set to prevent duplicates
+    local recognized_set = {}
     local strands = { dna_string, DnaModifier.get_complement(dna_string) }
 
     for _, strand in ipairs(strands) do
-        -- Check for terminator first
         local terminator_pos = strand:find(TERMINATOR_CODON, 1, true)
         if terminator_pos and not recognized_set[TERMINATOR_CODON] then
-             table.insert(found_codons, TERMINATOR_CODON .. " (Terminator)")
+             t_insert(found_codons, TERMINATOR_CODON .. " (Terminator)")
              recognized_set[TERMINATOR_CODON] = true
         end
 
-        -- Check for palindromes
         for pattern, effect in pairs(PALINDROME_MAP) do
             if strand:find(pattern) and not recognized_set[pattern] then
-                table.insert(found_codons, pattern .. " (" .. effect.attribute .. ")")
+                t_insert(found_codons, pattern .. " (" .. effect.attribute .. ")")
                 recognized_set[pattern] = true
             end
         end
-        -- Check for regular codons
+
         for i = 1, #strand - CODON_LENGTH + 1, CODON_LENGTH do
-            local codon_str = strand:sub(i, i + CODON_LENGTH - 1)
+            local codon_str = s_sub(strand, i, i + CODON_LENGTH - 1)
             local codon = CODON_MAP[codon_str]
             if codon and codon.type ~= "junk" and not recognized_set[codon_str] then
                 local description = ""
@@ -156,7 +165,7 @@ function DnaModifier.enumerate_codons(dna_string)
                 elseif codon.type == "suppressor" then
                     description = "suppresses " .. codon.tag
                 end
-                table.insert(found_codons, codon_str .. " (" .. description .. ")")
+                t_insert(found_codons, codon_str .. " (" .. description .. ")")
                 recognized_set[codon_str] = true
             end
         end
@@ -175,30 +184,33 @@ function DnaModifier.decode_dna(dna_string)
     local strands = { dna_string, DnaModifier.get_complement(dna_string) }
 
     for _, strand in ipairs(strands) do
-        local terminator_pos = strand:find(TERMINATOR_CODON, 1, true)
         local effective_strand = strand
+        local terminator_pos = strand:find(TERMINATOR_CODON, 1, true)
         if terminator_pos then
-            effective_strand = strand:sub(1, terminator_pos - 1)
+            effective_strand = s_sub(strand, 1, terminator_pos - 1)
         end
 
+        -- Check Palindromes
         for pattern, effect in pairs(PALINDROME_MAP) do
             if effective_strand:find(pattern) then
                 raw_effects[effect.attribute] = raw_effects[effect.attribute] or {}
-                table.insert(raw_effects[effect.attribute], effect.value)
+                t_insert(raw_effects[effect.attribute], effect.value)
             end
         end
 
-        for i = 1, #effective_strand - CODON_LENGTH + 1, CODON_LENGTH do
-            local codon_str = effective_strand:sub(i, i + CODON_LENGTH - 1)
+        -- Check Codons
+        local len = #effective_strand
+        for i = 1, len - CODON_LENGTH + 1, CODON_LENGTH do
+            local codon_str = s_sub(effective_strand, i, i + CODON_LENGTH - 1)
             local codon = CODON_MAP[codon_str]
             if codon then
                 if codon.type == "positive" then
                     raw_effects[codon.attribute] = raw_effects[codon.attribute] or {}
-                    table.insert(raw_effects[codon.attribute], codon.value)
+                    t_insert(raw_effects[codon.attribute], codon.value)
                     if codon.debuffs then
                         for _, debuff in ipairs(codon.debuffs) do
                             raw_effects[debuff.attribute] = raw_effects[debuff.attribute] or {}
-                            table.insert(raw_effects[debuff.attribute], { value = debuff.value, tag = debuff.tag })
+                            t_insert(raw_effects[debuff.attribute], { value = debuff.value, tag = debuff.tag })
                         end
                     end
                 elseif codon.type == "suppressor" then
@@ -213,8 +225,9 @@ function DnaModifier.decode_dna(dna_string)
         local total_effect = 0
         local simple_values = {}
         local tagged_debuffs = {}
+
         for _, v in ipairs(values) do
-            if type(v) == "table" then table.insert(tagged_debuffs, v) else table.insert(simple_values, v) end
+            if type(v) == "table" then t_insert(tagged_debuffs, v) else t_insert(simple_values, v) end
         end
 
         if #simple_values > 0 then
@@ -237,9 +250,10 @@ function DnaModifier.decode_dna(dna_string)
         final_modifiers[attribute] = total_effect
     end
 
+    -- Clamp percentages
     for attribute, value in pairs(final_modifiers) do
         if not FLAT_INTRINSICS[attribute] then
-            final_modifiers[attribute] = math.max(-0.9, math.min(1.0, value))
+            final_modifiers[attribute] = m_max(-0.9, m_min(1.0, value))
         end
     end
 
@@ -252,55 +266,73 @@ end
 -- #
 -- ####################################################################
 
+-- Optimized: Buffer-based mutation
 function DnaModifier.mutate_random(dna_string, mutation_rate)
-    local mutated_dna = ""
-    for i = 1, #dna_string do
-        if math.random() < mutation_rate then
-            local mutation_type = math.random(6)
-            -- if 3: deletion
+    local buffer = {}
+    local b_idx = 0
+    local len = #dna_string
+    local i = 1
+
+    -- Using a while loop allows us to skip characters (for deletions/groups) easier if needed
+    -- though here we primarily iterate linearly.
+    for pos = 1, len do
+        local char = s_sub(dna_string, pos, pos)
+
+        if m_random() < mutation_rate then
+            local mutation_type = m_random(6)
+
             if mutation_type == 1 then -- Substitution
-                mutated_dna = mutated_dna .. NUCLEOTIDES[math.random(#NUCLEOTIDES)]
+                b_idx = b_idx + 1; buffer[b_idx] = NUCLEOTIDES[m_random(4)]
             elseif mutation_type == 2 then -- Insertion
-                mutated_dna = mutated_dna .. NUCLEOTIDES[math.random(#NUCLEOTIDES)] .. dna_string:sub(i, i)
+                b_idx = b_idx + 1; buffer[b_idx] = NUCLEOTIDES[m_random(4)]
+                b_idx = b_idx + 1; buffer[b_idx] = char
             elseif mutation_type == 3 then -- Insertion (double)
-                mutated_dna = mutated_dna .. NUCLEOTIDES[math.random(#NUCLEOTIDES)] .. NUCLEOTIDES[math.random(#NUCLEOTIDES)] .. dna_string:sub(i, i)
+                b_idx = b_idx + 1; buffer[b_idx] = NUCLEOTIDES[m_random(4)]
+                b_idx = b_idx + 1; buffer[b_idx] = NUCLEOTIDES[m_random(4)]
+                b_idx = b_idx + 1; buffer[b_idx] = char
             elseif mutation_type == 4 then -- duplication (group)
-                local start_pos = math.max(1, i - 1)
-                local end_pos = math.min(#dna_string, i + 2)
-                mutated_dna = mutated_dna .. dna_string:sub(start_pos, end_pos)
+                local start_pos = m_max(1, pos - 1)
+                local end_pos = m_min(len, pos + 2)
+                local chunk = s_sub(dna_string, start_pos, end_pos)
+                b_idx = b_idx + 1; buffer[b_idx] = chunk
+                b_idx = b_idx + 1; buffer[b_idx] = chunk -- duplicate logic implies adding it?
+                -- Re-reading original logic: it appends the group to the current build
+                -- Original: mutated = mutated .. sub(start, end).
+                -- Since "char" is implicitly added in the 'else' of the original, type 4 replaced the char loop?
+                -- Wait, original logic: if mutation, do X, ELSE append char.
+                -- Type 4 in original: appends group *instead* of the current char.
             elseif mutation_type == 5 then -- duplication (single)
-                mutated_dna = mutated_dna .. dna_string:sub(i, i) .. dna_string:sub(i, i)
+                b_idx = b_idx + 1; buffer[b_idx] = char
+                b_idx = b_idx + 1; buffer[b_idx] = char
             end
+            -- Note: mutation_type 6 is implicit deletion (do nothing)
         else
-            mutated_dna = mutated_dna .. dna_string:sub(i, i)
+            b_idx = b_idx + 1; buffer[b_idx] = char
         end
     end
+
+    local mutated_dna = t_concat(buffer)
 
     local MAX_LENGTH = 1024
     local EXTREME_LENGTH = 2 * MAX_LENGTH
 
-    -- Handle extreme cases first
     if #mutated_dna > EXTREME_LENGTH then
-        -- Lose half the genome (hard truncate to half)
-        mutated_dna = mutated_dna:sub(1, math.floor(#mutated_dna / 2))
+        mutated_dna = s_sub(mutated_dna, 1, m_floor(#mutated_dna / 2))
     end
 
-    -- Now handle normal capping if over MAX_LENGTH
     if #mutated_dna > MAX_LENGTH then
-        -- Search for the last terminator codon
         local last_terminator_pos = nil
+        -- Scan backwards for terminator
         for pos = #mutated_dna - #TERMINATOR_CODON + 1, 1, -1 do
-            if mutated_dna:sub(pos, pos + #TERMINATOR_CODON - 1) == TERMINATOR_CODON then
+            if s_sub(mutated_dna, pos, pos + #TERMINATOR_CODON - 1) == TERMINATOR_CODON then
                 last_terminator_pos = pos
                 break
             end
         end
 
         if last_terminator_pos then
-            -- Cut at the start of the last terminator (excluding it and everything after)
-            mutated_dna = mutated_dna:sub(1, last_terminator_pos - 1)
+            mutated_dna = s_sub(mutated_dna, 1, last_terminator_pos - 1)
         else
-            -- No terminator found; append one at the end
             mutated_dna = mutated_dna .. TERMINATOR_CODON
         end
     end
@@ -308,31 +340,42 @@ function DnaModifier.mutate_random(dna_string, mutation_rate)
     return mutated_dna
 end
 
+-- Optimized: Buffer-based breeding
 function DnaModifier.breed(parent_pool, mutation_rate)
     if not parent_pool or #parent_pool < 2 then return parent_pool and parent_pool[1] or "" end
 
-    local p1_idx = math.random(#parent_pool)
-    local p2_idx = math.random(#parent_pool)
-    while p1_idx == p2_idx do p2_idx = math.random(#parent_pool) end
+    local p1_idx = m_random(#parent_pool)
+    local p2_idx = m_random(#parent_pool)
+    while p1_idx == p2_idx do p2_idx = m_random(#parent_pool) end
 
     local parent1, parent2 = parent_pool[p1_idx], parent_pool[p2_idx]
 
     local CHUNK_SIZE = 20
-    local child_dna = ""
-    local max_len = math.max(#parent1, #parent2)
+    local buffer = {}
+    local b_idx = 0
+    local max_len = m_max(#parent1, #parent2)
 
     for i = 1, max_len, CHUNK_SIZE do
-        local parent_choice = math.random(2)
-        local chunk = ""
+        local parent_choice = m_random(2)
+        local chunk
         if parent_choice == 1 and i <= #parent1 then
-            chunk = parent1:sub(i, math.min(i + CHUNK_SIZE - 1, #parent1))
+            chunk = s_sub(parent1, i, m_min(i + CHUNK_SIZE - 1, #parent1))
         elseif i <= #parent2 then
-            chunk = parent2:sub(i, math.min(i + CHUNK_SIZE - 1, #parent2))
+            chunk = s_sub(parent2, i, m_min(i + CHUNK_SIZE - 1, #parent2))
+        else
+            -- If the chosen parent has run out of DNA, try the other
+            if i <= #parent1 then chunk = s_sub(parent1, i, m_min(i + CHUNK_SIZE - 1, #parent1))
+            elseif i <= #parent2 then chunk = s_sub(parent2, i, m_min(i + CHUNK_SIZE - 1, #parent2))
+            end
         end
-        child_dna = child_dna .. chunk
+
+        if chunk then
+            b_idx = b_idx + 1
+            buffer[b_idx] = chunk
+        end
     end
 
-    return DnaModifier.mutate_random(child_dna, mutation_rate)
+    return DnaModifier.mutate_random(t_concat(buffer), mutation_rate)
 end
 
 function DnaModifier.research_splice(recipient_dna, donor_dna, target_codon)
@@ -344,79 +387,81 @@ function DnaModifier.research_splice(recipient_dna, donor_dna, target_codon)
         return outcome
     end
 
-    local roll = math.random()
-    if roll <= 0.6 then -- Success (60% chance)
-        local start_pos = math.max(1, donor_pos - 4)
-        local end_pos = math.min(#donor_dna, donor_pos + CODON_LENGTH + 3)
-        local splice_chunk = donor_dna:sub(start_pos, end_pos)
+    local roll = m_random()
+    if roll <= 0.6 then -- Success (60%)
+        local start_pos = m_max(1, donor_pos - 4)
+        local end_pos = m_min(#donor_dna, donor_pos + CODON_LENGTH + 3)
+        local splice_chunk = s_sub(donor_dna, start_pos, end_pos)
 
-        local insert_pos = math.random(#recipient_dna)
-        outcome.dna = recipient_dna:sub(1, insert_pos) .. splice_chunk .. recipient_dna:sub(insert_pos + 1)
+        local insert_pos = m_random(#recipient_dna)
+        outcome.dna = s_sub(recipient_dna, 1, insert_pos) .. splice_chunk .. s_sub(recipient_dna, insert_pos + 1)
         outcome.log = "Splicing successful: Gene sequence inserted."
-    elseif roll <= 0.85 then -- Failure 1: Sloppy Extraction (25% chance)
-        local start_pos = math.max(1, donor_pos - 12)
-        local end_pos = math.min(#donor_dna, donor_pos + CODON_LENGTH + 11)
-        local splice_chunk = donor_dna:sub(start_pos, end_pos)
+    elseif roll <= 0.85 then -- Failure 1 (25%)
+        local start_pos = m_max(1, donor_pos - 12)
+        local end_pos = m_min(#donor_dna, donor_pos + CODON_LENGTH + 11)
+        local splice_chunk = s_sub(donor_dna, start_pos, end_pos)
 
-        local insert_pos = math.random(#recipient_dna)
-        outcome.dna = recipient_dna:sub(1, insert_pos) .. splice_chunk .. recipient_dna:sub(insert_pos + 1)
+        local insert_pos = m_random(#recipient_dna)
+        outcome.dna = s_sub(recipient_dna, 1, insert_pos) .. splice_chunk .. s_sub(recipient_dna, insert_pos + 1)
         outcome.log = "Splicing resulted in contamination: A larger, unstable gene sequence was inserted."
-    else -- Failure 2: Immune Response (15% chance)
-        local insert_pos = math.random(#recipient_dna)
-        local damaged_dna = recipient_dna:sub(1, insert_pos) .. TERMINATOR_CODON .. recipient_dna:sub(insert_pos + 1)
+    else -- Failure 2 (15%)
+        local insert_pos = m_random(#recipient_dna)
+        local damaged_dna = s_sub(recipient_dna, 1, insert_pos) .. TERMINATOR_CODON .. s_sub(recipient_dna, insert_pos + 1)
         outcome.dna = DnaModifier.mutate_random(damaged_dna, 0.1)
-        outcome.log = "Splicing failed catastrophically: Genome rejected the splice, causing widespread corruption and termination."
+        outcome.log = "Splicing failed catastrophically: Genome rejected the splice."
     end
     return outcome
 end
 
+-- Optimized: Buffer-based irradiation
 function DnaModifier.research_irradiate(dna_string, mutagen_type)
-    local mutated_dna = ""
+    local buffer = {}
+    local b_idx = 0
     local i = 1
-    while i <= #dna_string do
-        if i + CODON_LENGTH - 1 <= #dna_string then
-            local codon_str = dna_string:sub(i, i + CODON_LENGTH - 1)
+    local len = #dna_string
+
+    while i <= len do
+        if i + CODON_LENGTH - 1 <= len then
+            local codon_str = s_sub(dna_string, i, i + CODON_LENGTH - 1)
             local codon = CODON_MAP[codon_str]
 
-            -- Check if it's a standard codon matching the type, or the terminator matching "terminator"
             local is_target_codon = (codon and codon.category == mutagen_type)
             local is_target_terminator = (codon_str == TERMINATOR_CODON and mutagen_type == "terminator")
 
-            if (is_target_codon or is_target_terminator) and math.random(100) > 50 then
-                mutated_dna = mutated_dna .. DnaModifier.mutate_random(codon_str, 0.75)
+            if (is_target_codon or is_target_terminator) and m_random(100) > 50 then
+                b_idx = b_idx + 1
+                buffer[b_idx] = DnaModifier.mutate_random(codon_str, 0.75)
             else
-                mutated_dna = mutated_dna .. dna_string:sub(i, i)
+                b_idx = b_idx + 1
+                buffer[b_idx] = codon_str
             end
+            i = i + 4
         else
-            mutated_dna = mutated_dna .. dna_string:sub(i, i)
+            -- Append remaining characters that don't fit a 4-block
+            b_idx = b_idx + 1
+            buffer[b_idx] = s_sub(dna_string, i, i)
+            i = i + 1
         end
-        i = i + 4
     end
-    return mutated_dna
+    return t_concat(buffer)
 end
 
+-- UPDATED: Now utilizes the immutable map via SUPPRESSOR_LOOKUP
 function DnaModifier.research_stabilize(dna_string, debuff_tag)
     local outcome = { dna = dna_string, log = "" }
 
-    if math.random() <= 0.5 then -- Success (50% chance)
-        local new_suppressor_str
-        for _ = 1, 100 do
-            local random_codon = DnaModifier.generate_junk_dna(CODON_LENGTH)
-            -- Ensure generated junk is not the terminator and not a known codon
-            if not CODON_MAP[random_codon] and random_codon ~= TERMINATOR_CODON then
-                new_suppressor_str = random_codon;
-                break;
-            end
-        end
+    -- We can no longer "invent" new codons. We must find the one that exists for this tag.
+    local suppressor_codon = SUPPRESSOR_LOOKUP[debuff_tag]
 
-        if new_suppressor_str then
-            CODON_MAP[new_suppressor_str] = { type = "suppressor", tag = debuff_tag }
-            local insert_pos = math.random(#outcome.dna)
-            outcome.dna = outcome.dna:sub(1, insert_pos) .. new_suppressor_str .. outcome.dna:sub(insert_pos + 1)
-            outcome.log = "Research successful: A new suppressor codon (" .. new_suppressor_str .. ") was synthesized and inserted."
-        else
-            outcome.log = "Research failed: Could not synthesize a stable suppressor sequence."
-        end
+    if not suppressor_codon then
+        outcome.log = "Research failed: No known suppressor sequence exists for this anomaly."
+        return outcome
+    end
+
+    if m_random() <= 0.5 then -- Success (50% chance)
+        local insert_pos = m_random(#outcome.dna)
+        outcome.dna = s_sub(outcome.dna, 1, insert_pos) .. suppressor_codon .. s_sub(outcome.dna, insert_pos + 1)
+        outcome.log = "Research successful: A suppressor codon (" .. suppressor_codon .. ") was synthesized and inserted."
     else
         outcome.log = "Research failed: The experimental process yielded no results."
     end

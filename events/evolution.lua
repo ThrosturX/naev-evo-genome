@@ -512,7 +512,7 @@ function EVO_DISCUSS_RESEARCH()
     vn.label("speak_msg")
     scientist(function() return msg end)
     local affect_choices = {
-        { "Purchase", "purchase" }, -- TODO: set price
+        { "Purchase (free)", "purchase" }, -- TODO: set price
         { "Irradiate", "irradiate" },
         { "Forget", "delete" },
         { "Cancel", "end" }

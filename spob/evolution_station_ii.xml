@@ -7,7 +7,7 @@
  </GFX>
  <presence>
      <faction>Scientific Research Conglomerate</faction>
-     <base>0</base>
+     <base>1</base>
      <bonus>0</bonus>
      <range>0</range>
  </presence>
@@ -23,8 +23,8 @@
    <outfits/>
    <shipyard/>
   </services>
-  <description>TODO Description</description>
-  <bar>More like a library than a bar.</bar>
+  <description>The Scientific Research Conglomerate is a good place to do research, as they have mastered technology that can use artificial bio-processes to construct ships with special properties encoded by the artificial genome. Well, mastered might not be the right word, but the results look promising. </description>
+  <bar>This place is more like a library than a bar, but nobody seems to mind food and drink near their electronics.</bar>
  </general>
  <tech>
   <item>Engines Cargo</item>

@@ -1,12 +1,12 @@
 <faction name="Guild of Free Traders">
  <ai>pirate</ai>
- <logo>trader</logo>
+ <logo>gft-logo</logo>
  <static/>
  <invisible/>
  <known/>
  <player>3</player>
  <colour>green</colour>
- <spawn>independent</spawn>
+ <spawn>trader</spawn>
  <standing>static</standing>
  <allies/>
  <enemies>

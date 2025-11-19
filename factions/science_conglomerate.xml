@@ -1,12 +1,12 @@
 <faction name="Scientific Research Conglomerate">
  <ai>mercenary</ai>
- <logo>miner</logo>
+ <logo>src-logo</logo>
  <static/>
  <invisible/>
  <known/>
  <player>3</player>
  <colour>green</colour>
- <spawn>independent</spawn>
+ <spawn>src-miner</spawn>
  <standing>static</standing>
  <allies/>
  <enemies>

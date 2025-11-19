@@ -7,7 +7,7 @@
  </GFX>
  <presence>
      <faction>Guild of Free Traders</faction>
-     <base>0</base>
+     <base>1</base>
      <bonus>0</bonus>
      <range>0</range>
  </presence>
@@ -23,8 +23,8 @@
    <outfits/>
    <shipyard/>
   </services>
-  <description>TODO Description</description>
-  <bar>TODO Bar Description</bar>
+  <description>The Guild of Free Traders have a long history, but it mostly consists of individual vagabonds who are either pirates, traders -- or both.</description>
+  <bar>The bar reeks of foul chemical odors caused by the adjacent makeshift research facility. Most of the patrons have face masks, either on their faces or on their person.</bar>
  </general>
  <tech>
   <item>Engines Cargo</item>

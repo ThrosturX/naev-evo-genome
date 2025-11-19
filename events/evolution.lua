@@ -22,12 +22,12 @@ local spark         = require "luaspfx.spark"
 -- NOTE: 'tk' is global, do not require it.
 
 local dna_mod       = require "dna_modifier.dna_modifier"
--- luacheck: globals enter load EVO_CHECK_SYSTEM EVO_DISCUSS_RESEARCH EVOLVE SCORE_ATTACKED hailed
+-- luacheck: globals enter load EVO_CHECK_SYSTEM EVO_DISCUSS_RESEARCH EVOLVE SCORE_ATTACKED EVO_MINER_LANDED hailed
 
 -- Configuration
 local MAX_GENOMES          = 6
 local CATACLYSM_CHANCE     = 0.5
-local ARENA_RADIUS         = 5000
+local ARENA_RADIUS         = 6000
 local FAC_BLUE             = "Scientific Research Conglomerate"
 local FAC_RED              = "Guild of Free Traders"
 local SIZE_CUTOFF          = 3.0 -- Size threshold for Small vs Big ships
@@ -270,8 +270,26 @@ local function spawn_champion(fac)
     local hull = top.hull
     local champ = spawn_warrior(fac, hull, "big", top.genome)
     hook.pilot(champ, "attacked", "CHAMP_ATTACKED")
-    champ:rename(fmt.f("Hyena M-{no}/{fac}", {no = top.genome:len(), fac = fac:gsub("[^A-Z]", "")} ))
+    champ:rename(fmt.f("{hull} M-{no}/{fac}", {hull = top.hull, no = top.genome:len(), fac = fac:gsub("[^A-Z]", "")} ))
     champ:broadcast(fmt.f("The {fac} is not to be messed with!", {fac=fac}))
+end
+
+function EVO_MINER_LANDED(miner, location)
+    -- calculate cargo worth
+    local total_value = 0
+    for _i, v in ipairs(miner:cargoList()) do
+        total_value = total_value + v.q * commodity.price(v.c)
+    end
+    local pmem = miner:memory()
+    if not pmem.score then pmem.score = 0 end
+    local final_score = math.floor(total_value * 0.02) + pmem.score
+    
+    local f_id = miner:faction():nameRaw()
+    local hull = miner:ship():nameRaw()
+    local genome = pmem.genome
+    -- contribute to the genome
+    table.insert(GENOMES[f_id], { genome = genome, score  = final_score, hull = hull })
+    miner:broadcast(fmt.f("I landed with cargo worth {t}! (final score {s})", { t = total_value, s = final_score } ))
 end
 
 function EVOLVE(dead_pilot, killer)
@@ -447,10 +465,14 @@ function EVO_DISCUSS_RESEARCH()
             local ships_data = mem.evolution[fac].ships
             local size_class = "small"
             if math.random(6) == 1 then size_class = "big" end
+            -- hidden logic: top-listed genome more likely to receive funding
+            if selected_genome_idx == 1 and math.random(10) > 1 then
+                size_class = "big"
+            end
             entry.hull = ships_data[size_class][math.random(#ships_data[size_class])]
         end
     end)
-    scientist(function() return fmt.f("We'll build a {hull}", {hull = fac_genomes[selected_genome_idx].hull}) end)
+    scientist(function() return fmt.f("We'll experiment on the {hull}.", {hull = fac_genomes[selected_genome_idx].hull}) end)
     vn.jump("end")
 
     vn.label("g_rad")
@@ -629,8 +651,9 @@ function enter()
     local cur = system.cur()
     if cur:nameRaw() ~= "Evolution Sandbox" then return end
 
-    spawn_warrior(FAC_BLUE)
-    spawn_warrior(FAC_RED)
+    -- spawn champions first!
+    spawn_champion(FAC_BLUE)
+    spawn_champion(FAC_RED)
     hook.timer(3, "EVO_CHECK_SYSTEM")
 
     if not mem.evolution_data then mem.evolution_data = {} end
@@ -648,11 +671,11 @@ function EVO_CHECK_SYSTEM()
     -- Boundary Check
     for _, sp in ipairs(aps) do
         if sp:pos():dist() > ARENA_RADIUS then
-            if sp:memory().genome then
+            local spmem = sp:memory()
+            if spmem.genome then
                 sp:damage(100, 0, 10, "explosion_splash") -- gentle nudge damage
                 spark(sp:pos(), sp:vel()*-1, 50)
-                local v = sp:vel()
-                sp:setVel(vec2.new(-v.x, -v.y)) -- Turn around
+                spmem.aggressive = true
             end
         end
     end
@@ -660,7 +683,19 @@ function EVO_CHECK_SYSTEM()
     local blues = pilot.get(faction.get(FAC_BLUE))
     local reds = pilot.get(faction.get(FAC_RED))
     local b_pow, r_pow = 0, 0
-    for _, p in ipairs(blues) do b_pow = b_pow + p:ship():size() end
+    for _, p in ipairs(blues) do
+        local pmem = p:memory()
+        if pmem.genome ~= nil then
+            b_pow = b_pow + p:ship():size()
+        elseif p:ai() == "miner" then
+            -- give it a random genome
+           local genomes = GENOMES[FAC_BLUE]
+           pmem.genome = genomes[math.random(#genomes)].genome
+           dna_mod.apply_dna_to_pilot(p, pmem.genome)
+           -- hook it on landing (success for a miner)
+           hook.pilot(p, "land", "EVO_MINER_LANDED")
+        end
+    end
     for _, p in ipairs(reds) do r_pow = r_pow + p:ship():size() end
 
     -- Blue Logic

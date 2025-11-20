@@ -219,8 +219,9 @@ function spawn_miner(fac, hull)
         hull = pool[math.random(#pool)]
     end
 
-    local miner = pilot.add(hull, "Miner", nil, nil, { ai = "miner" }) 
+    local miner = pilot.add(hull, "Miner", spob.get( faction.get(fac) ), nil, { ai = "miner" }) 
     miner:setFaction(fac)
+    miner:changeAI("miner")
     local pmem = miner:memory()
 
     local genomes = GENOMES[fac]
@@ -238,6 +239,11 @@ function spawn_miner(fac, hull)
     for _i, v in ipairs(miner:cargoList()) do
         miner:cargoRm(v.c, v.q)
     end
+
+    -- don't be a wimp
+    pmem.norun = true
+    pmem.shield_run = -1
+    pmem.armour_run = 40
 
     return miner
 end
@@ -688,6 +694,7 @@ end
 
 function enter()
     local genome = player.shipvarPeek("genome")
+    print("APPLY GENOME? " .. genome)
     if genome then dna_mod.apply_dna_to_pilot(player.pilot(), genome) end
 
     local cur = system.cur()
@@ -702,6 +709,7 @@ function enter()
     if not mem.evolution_data.lhook then mem.evolution_data.lhook = hook.land("land") end
 end
 
+local MINERS = {}
 -- Arena Loop
 function EVO_CHECK_SYSTEM()
     local cur = system.cur()
@@ -733,31 +741,40 @@ function EVO_CHECK_SYSTEM()
         if pmem.genome ~= nil then
             if pmem.score and pmem.score > 100 then
                 b_pow = b_pow + p:ship():size()
+            else
+                b_pow = b_pow + 0.2 * p:ship():size()
             end
         end
     end
     for _, p in ipairs(reds) do r_pow = r_pow + p:ship():size() end
 
     -- Blue Logic
-    if not blues or #blues == 0 or (math.random(4)==1 and b_pow < 8) then
+    if not blues or #blues == 0 or (math.random(4)==1 and b_pow < 5) then
         if math.random(10) == 1 then spawn_champion(FAC_BLUE)
         elseif r_pow > 8 then spawn_warrior(FAC_BLUE, nil, "big")
         else spawn_warrior(FAC_BLUE, nil, "small") end
     end
 
     -- Red Logic
-    if not reds or #reds == 0 or (math.random(4)==1 and r_pow < 8) then
+    if not reds or #reds == 0 or (math.random(4)==1 and r_pow < 5) then
         if math.random(10) == 1 then spawn_champion(FAC_RED)
         elseif b_pow > 8 then spawn_warrior(FAC_RED, nil, "big")
         else spawn_warrior(FAC_RED, nil, "small") end
     end
-
+--[[ spawn miner was here --]]
     local roll = math.random(10)
     if roll == 1 then
-        spawn_miner(FAC_BLUE)
+        local mp = MINERS[FAC_BLUE]
+        if not mp or not mp:exists() then
+            MINERS[FAC_BLUE] = spawn_miner(FAC_BLUE)
+        end
     elseif roll == 2 then
-        spawn_miner(FAC_RED)
+        local mp = MINERS[FAC_RED]
+        if not mp or not mp:exists() then
+            MINERS[FAC_RED] = spawn_miner(FAC_RED)
+        end
     end
+    --]]
 
 
     hook.timer(3, "EVO_CHECK_SYSTEM")

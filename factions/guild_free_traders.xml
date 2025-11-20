@@ -6,7 +6,7 @@
  <known/>
  <player>3</player>
  <colour>green</colour>
- <spawn>trader</spawn>
+ <spawn>miner</spawn>
  <standing>static</standing>
  <allies/>
  <enemies>

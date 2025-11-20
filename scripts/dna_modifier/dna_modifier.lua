@@ -530,12 +530,15 @@ end
 
 function DnaModifier.apply_dna_to_pilot(pilot_entity, dna_string)
     if not pilot_entity or not pilot_entity.intrinsicSet or not dna_string then return nil end
+    local smem = pilot_entity:shipMemory()
     local modifiers = DnaModifier.decode_dna(dna_string)
+    if smem.dna_applied ~= nil then return modifiers end
     for attribute, value in pairs(modifiers) do
         local api_value = value
         if not FLAT_INTRINSICS[attribute] then api_value = value * 100 end
         pilot_entity:intrinsicSet(attribute, api_value)
     end
+    smem.dna_applied = true
     return modifiers
 end
 

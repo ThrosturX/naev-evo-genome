@@ -694,7 +694,6 @@ end
 
 function enter()
     local genome = player.shipvarPeek("genome")
-    print("APPLY GENOME? " .. genome)
     if genome then dna_mod.apply_dna_to_pilot(player.pilot(), genome) end
 
     local cur = system.cur()

@@ -232,6 +232,8 @@ function spawn_miner(fac, hull)
         -- hook it on landing (success for a miner)
         if not pmem.lhook then
             pmem.lhook = hook.pilot(miner, "land", "EVO_MINER_LANDED")
+            -- allow running if actually attacked
+            hook.pilot(miner, "attacked", "EVO_MINER_ATTACKED")
         end
     end
 
@@ -244,6 +246,7 @@ function spawn_miner(fac, hull)
     pmem.norun = true
     pmem.shield_run = -1
     pmem.armour_run = 40
+    pmem.wimp = true -- for lack of better variable name
 
     return miner
 end
@@ -317,9 +320,23 @@ local function spawn_champion(fac)
     champ:broadcast(fmt.f("The {fac} is not to be messed with!", {fac=fac}))
 end
 
+function EVO_MINER_ATTACKED(receiver, attacker, amount)
+    if receiver:health() < 50 or receiver:health(true) < 10 * amount then
+        local rmem = receiver:memory()
+        if rmem.norun then
+            rmem.norun = false
+            spawn_warrior(receiver:faction():nameRaw())
+            receiver:broadcast("Will somebody please help me??")
+        end
+    end
+end
+
 function EVO_MINER_LANDED(miner, location)
     -- calculate cargo worth
     local total_value = 0
+    for _i, v in ipairs(miner:cargoList()) do
+        total_value = total_value + v.q * math.max(325, v.c:price())
+    end
     local pmem = miner:memory()
     if not pmem.score then pmem.score = 0 end
     local final_score = math.floor((total_value * 0.0247 / miner:ship():size()) + pmem.score)
@@ -679,6 +696,10 @@ function display_info()
 end
 
 function load()
+--  local diffname = "evo_ngc2601_connection"
+--  if not diff.isApplied(diffname) then
+--      diff.apply(diffname)
+--  end
     if not mem.evolution then mem.evolution = {} end
     init_ship_tables(FAC_BLUE)
     init_ship_tables(FAC_RED)
@@ -731,15 +752,38 @@ function EVO_CHECK_SYSTEM()
             end
         end
     end
+    
+--[[ spawn miner here --]]
+    local roll = math.random(3)
+    if roll == 1 then
+        local mp = MINERS[FAC_BLUE]
+        if not mp or not mp:exists() then
+            MINERS[FAC_BLUE] = spawn_miner(FAC_BLUE)
+        end
+    elseif roll == 2 then
+        local mp = MINERS[FAC_RED]
+        if not mp or not mp:exists() then
+            MINERS[FAC_RED] = spawn_miner(FAC_RED)
+        end
+    end
+    --]]
 
     local blues = pilot.get(faction.get(FAC_BLUE))
     local reds = pilot.get(faction.get(FAC_RED))
+
+    -- periodic pause
+    if blues and reds and math.random(2) == 1 then
+        hook.timer(10 + math.random(5), "EVO_CHECK_SYSTEM")
+        return
+    end
     local b_pow, r_pow = 0, 0
     for _, p in ipairs(blues) do
         local pmem = p:memory()
         if pmem.genome ~= nil then
             if pmem.score and pmem.score > 100 then
                 b_pow = b_pow + p:ship():size()
+            elseif pmem.wimp then
+                b_pow = b_pow + 0.5
             else
                 b_pow = b_pow + 0.2 * p:ship():size()
             end
@@ -760,21 +804,7 @@ function EVO_CHECK_SYSTEM()
         elseif b_pow > 8 then spawn_warrior(FAC_RED, nil, "big")
         else spawn_warrior(FAC_RED, nil, "small") end
     end
---[[ spawn miner was here --]]
-    local roll = math.random(10)
-    if roll == 1 then
-        local mp = MINERS[FAC_BLUE]
-        if not mp or not mp:exists() then
-            MINERS[FAC_BLUE] = spawn_miner(FAC_BLUE)
-        end
-    elseif roll == 2 then
-        local mp = MINERS[FAC_RED]
-        if not mp or not mp:exists() then
-            MINERS[FAC_RED] = spawn_miner(FAC_RED)
-        end
-    end
-    --]]
 
 
-    hook.timer(3, "EVO_CHECK_SYSTEM")
+    hook.timer(3 + math.random(5), "EVO_CHECK_SYSTEM")
 end

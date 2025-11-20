@@ -47,7 +47,7 @@ local CODON_MAP = {
     ["TCTC"] = { type = "positive", category = "defense", attribute = "shield_mod", value = 0.15, debuffs = { { attribute = "stress_dissipation", value = -20, tag = "SHIELD_OVERLOAD" } } },
     ["AGTC"] = { type = "positive", category = "defense", attribute = "shield_regen", value = 0.10, debuffs = { { attribute = "shield_mod", value = -0.05, tag = "SHIELD_OVERLOAD" } } },
     ["CGCG"] = { type = "positive", category = "defense", attribute = "armour", value = 125, debuffs = { { attribute = "accel_mod", value = -0.05, tag = "INERTIA" } } },
-    ["CGCT"] = { type = "positive", category = "defense", attribute = "armour", value = 50, debuffs = { { attribute = "mass", value = 100, tag = "HEAVY_MASS" } } },
+    ["CGCT"] = { type = "positive", category = "defense", attribute = "armour", value = 50, debuffs = { { attribute = "mass", value = 50, tag = "HEAVY_MASS" } } },
     ["AATT"] = { type = "positive", category = "defense", attribute = "armour_regen", value = 1, debuffs = { { attribute = "armour_mod", value = -0.10, tag = "ARMOR_WEAK" } } },
     ["AATG"] = { type = "positive", category = "defense", attribute = "armour_regen", value = 2, debuffs = { { attribute = "armour_mod", value = -0.15, tag = "ARMOR_WEAK" } } },
     ["AATA"] = { type = "positive", category = "defense", attribute = "armour_regen", value = 3, debuffs = { { attribute = "armour_mod", value = -0.15, tag = "ARMOR_WEAK" }, { attribute = "mass_mod", value = 0.1, tag = "HEAVY_MASS" } } },

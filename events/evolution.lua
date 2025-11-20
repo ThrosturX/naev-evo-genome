@@ -328,9 +328,17 @@ function EVO_MINER_ATTACKED(receiver, attacker, amount)
             spawn_warrior(receiver:faction():nameRaw())
             receiver:broadcast("Will somebody please help me??")
         end
+        -- took a big hit and survived
+        local rmem = receiver:memory()
+        if rmem.score ~= nil then
+            rmem.score = rmem.score + amount
+        else
+            rmem.score = amount
+        end
     end
 end
 
+-- miners are only scored if they manage to land
 function EVO_MINER_LANDED(miner, location)
     -- calculate cargo worth
     local total_value = 0
@@ -340,8 +348,14 @@ function EVO_MINER_LANDED(miner, location)
     local pmem = miner:memory()
     if not pmem.score then pmem.score = 0 end
     local final_score = math.floor((total_value * 0.0247 / miner:ship():size()) + pmem.score)
-    
+    -- didn't run? Extra points!
+    if miner:cargoFree() == 0 then
+        final_score = final_score * 5 / miner:ship():size()
+    end
+
     local f_id = miner:faction():nameRaw()
+    -- give the miner a better chance to incorporate the genome
+    _ignored = pick_top_genome(f_id) -- prunes & sorts genome table
     if final_score > 300 and #GENOMES[f_id] < MAX_GENOMES + 2 then
         local hull = miner:ship():nameRaw()
         local genome = pmem.genome
@@ -541,6 +555,7 @@ function EVO_DISCUSS_RESEARCH()
     vn.jump("end")
 
     vn.label("g_rad")
+    scientist("The available mutagens to target are:\nterminator, defense, propulsion, weaponry, utility\nNote that the purpose of radiation research is to neutralize the target mutagen.")
     vn.func(function()
         local entry = fac_genomes[selected_genome_idx]
         if entry then
@@ -689,7 +704,7 @@ function display_info()
             -- Use the enumerate functionality here too
             local codons = dna_mod.enumerate_codons(entry.genome)
             for _, codon in ipairs(codons) do msg = msg .. ", " .. tostring(codon) end
-            print(fmt.f("({f}) {v}: {m}", {m=msg,v=entry.score,fac=fac}))
+            print(fmt.f("({f}) {v}: {m}", {m=msg,v=entry.score,f=fac}))
         end
     end
     print("--GENOMES--")

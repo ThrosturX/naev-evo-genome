@@ -56,9 +56,9 @@ local CODON_MAP = {
     ["ATTT"] = { type = "positive", category = "defense", attribute = "shield_regen_mod", value = 0.28, debuffs = { { attribute = "shield_mod", value = -0.20, tag = "SHIELD_OVERLOAD" }, { attribute = "energy_regen_mod", value = -0.15, tag = "ENERGY_DRAIN" }, { attribute = "stress_dissipation", value = -10, tag = "SHIELD_OVERLOAD" } } },
     ["CATC"] = { type = "positive", category = "defense", attribute = "stress_dissipation", value = 3, debuffs = { { attribute = "shield_mod", value = -0.10, tag = "SHIELD_OVERLOAD" } } },
     ["CATA"] = { type = "positive", category = "defense", attribute = "stress_dissipation", value = 5, debuffs = { { attribute = "shield_mod", value = -0.15, tag = "SHIELD_OVERLOAD" }, { attribute = "energy_mod", value = -0.05, tag = "ENERGY_DRAIN" } } },
-    ["ACTA"] = { type = "positive", category = "defense", attribute = "shielddown_mod", value = 0.10, debuffs = { { attribute = "shield_mod", value = -0.15, tag = "SHIELD_OVERLOAD" } } },
-    ["ACTG"] = { type = "positive", category = "defense", attribute = "shielddown_mod", value = 0.20, debuffs = { { attribute = "shield_mod", value = -0.25, tag = "SHIELD_OVERLOAD" }, { attribute = "energy_mod", value = -0.10, tag = "ENERGY_DRAIN" } } },
-    ["ACTC"] = { type = "positive", category = "defense", attribute = "shielddown_mod", value = 0.30, debuffs = { { attribute = "shield_mod", value = -0.35, tag = "SHIELD_OVERLOAD" }, { attribute = "energy_mod", value = -0.15, tag = "ENERGY_DRAIN" }, { attribute = "ew_signature", value = 0.10, tag = "SENSOR_STRAIN" } } },
+    ["ACTA"] = { type = "positive", category = "defense", attribute = "shielddown_mod", value = -0.10, debuffs = { { attribute = "shield_mod", value = -0.15, tag = "SHIELD_OVERLOAD" } } },
+    ["ACTG"] = { type = "positive", category = "defense", attribute = "shielddown_mod", value = -0.20, debuffs = { { attribute = "shield_mod", value = -0.25, tag = "SHIELD_OVERLOAD" }, { attribute = "energy_mod", value = -0.10, tag = "ENERGY_DRAIN" } } },
+    ["ACTC"] = { type = "positive", category = "defense", attribute = "shielddown_mod", value = -0.30, debuffs = { { attribute = "shield_mod", value = -0.35, tag = "SHIELD_OVERLOAD" }, { attribute = "energy_mod", value = -0.15, tag = "ENERGY_DRAIN" }, { attribute = "ew_signature", value = 0.10, tag = "SENSOR_STRAIN" } } },
 
     -- Group: Mobility & Propulsion
     ["CTAG"] = { type = "positive", category = "propulsion", attribute = "speed_mod", value = 0.10, debuffs = { { attribute = "armour_mod", value = -0.08, tag = "ARMOR_WEAK" } } },
@@ -304,7 +304,7 @@ function DnaModifier.decode_dna(dna_string)
         for _, debuff in ipairs(tagged_debuffs) do
             local mitigation = 1.0
             if debuff.tag and suppressor_counts[debuff.tag] then
-                mitigation = 0.5 ^ suppressor_counts[debuff.tag]
+                mitigation = 0.75 ^ suppressor_counts[debuff.tag]
             end
             total_effect = total_effect + (debuff.value * mitigation)
         end
@@ -528,18 +528,59 @@ function DnaModifier.research_stabilize(dna_string, debuff_tag)
     return outcome
 end
 
-function DnaModifier.apply_dna_to_pilot(pilot_entity, dna_string)
+function DnaModifier._apply_dna_to_pilot(pilot_entity, dna_string)
     if not pilot_entity or not pilot_entity.intrinsicSet or not dna_string then return nil end
     local smem = pilot_entity:shipMemory()
     local modifiers = DnaModifier.decode_dna(dna_string)
-    if smem.dna_applied ~= nil then return modifiers end
+    if smem.dna_applied ~= nil then
+        if dna_string == smem.dna_applied then
+            return modifiers
+        else
+            -- reverse previous modifications
+            local omods = DnaModifier.decode_dna(smem.dna_applied)
+            for attr, val in pairs(omods) do
+                local nval = -val
+                if not FLAT_INTRINSICS[attr] then nval = nval * 100 end
+                pilot_entity:intrinsicSet(attr, nval)
+            end
+        end
+    end
+    -- apply dna effects
     for attribute, value in pairs(modifiers) do
         local api_value = value
         if not FLAT_INTRINSICS[attribute] then api_value = value * 100 end
         pilot_entity:intrinsicSet(attribute, api_value)
     end
-    smem.dna_applied = true
+    smem.dna_applied = dna_string
+    pilot_entity:shipvarPop("genome") -- necessary?
+    pilot_entity:shipvarPush("genome", dna_string)
     return modifiers
+end
+
+function DnaModifier.apply_dna_to_pilot(pilot_entity, dna_string)
+    -- check pilot argument
+    if not pilot_entity or not pilot_entity.intrinsicSet then return nil end
+
+    -- check optional genome argument
+    if not dna_string then
+        dna_string = pilot_entity:shipvarPop("genome")
+        if not dna_string then
+            return nil  -- no genome exists for this ship yet!
+        end
+    end
+
+    -- we got all we need, the genome now governs intrinsic stats
+    local smem = pilot_entity:shipMemory()
+    local modifiers = DnaModifier.decode_dna(dna_string)
+    pilot_entity:intrinsicReset()
+    for attr, val in pairs(modifiers) do
+        local aval = val
+        if not FLAT_INTRINSICS[attr] then aval = val * 100 end
+        pilot_entity:intrinsicSet(attr, aval, true)
+    end
+    -- in case we want to check if the applied DNA is the same as the genome shipvar
+    smem.dna_applied = dna_string
+    pilot_entity:shipvarPush("genome", dna_string)
 end
 
 return DnaModifier

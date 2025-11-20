@@ -18,6 +18,8 @@ local genome = ""
 local function vnDNA ()
     genome = player.pilot():shipvarPeek("genome")
     if not genome then genome = "" end
+    mem.genome_bank = naev.cache().genome_bank
+    if not mem.genome_bank then mem.genome_bank = {} end
     local restart = false
     local complement = dna_mod.get_complement(genome)
     local msg = fmt.f("The current genome is {g}\nThe complement is {c}", {g = genome, c = complement})
@@ -95,10 +97,37 @@ local function vnDNA ()
     vn.na(function() return msg end)
     vn.jump("end")
     vn.label("splice")
+    vn.na("Which donor DNA to use?")
+    local donor_choices = { {"Synthetic junk DNA", "splice_ready"} }
+    print("in bank:")
+    for g, gi in pairs(mem.genome_bank) do
+        print(tostring(g))
+    end
+    for _seq, g_data in pairs(mem.genome_bank) do
+        local seq_id = fmt.f(
+            "{g}-{c}/{l} ({s}/{h})",
+            {
+                g = string.sub(g_data.genome, 1, 4),
+                c = string.sub(dna_mod.get_complement(g_data.genome), 1, 4),
+                l = g_data.genome:len(),
+                h = g_data.hull,
+                s = g_data.score
+            }
+        )
+        table.insert(donor_choices, { seq_id , seq_id })
+        vn.label(seq_id)
+        vn.func(function()
+            donor = g_data.genome
+        end)
+    end
+    vn.func(function()
+        donor = dna_mod.generate_junk_dna(62)
+    end)
+    vn.menu(donor_choices)
+
+    vn.label("splice_ready")
     vn.func(function()
         local target = tk.input( "Splice DNA", 4, 24, "target codon" )
-        -- NOTE: Make donor come from player's "saved DNA" database or something
-        local donor = dna_mod.generate_junk_dna(target:len() * 20) -- TODO
         local outcome = dna_mod.research_splice(genome, donor, target)
         genome, msg = outcome.dna, outcome.log
         mods = dna_mod.apply_dna_to_pilot(pp, genome)

@@ -430,6 +430,22 @@ end
 -- #    VN & INTERACTION
 -- ####################################################################
 
+local function purchase_sequence ( genome, g_info, price )
+    if not mem.genome_bank then
+        mem.genome_bank = {}
+    end
+    if player.credits() >= price then
+        player.pay(-price)
+        mem.genome_bank[genome] = g_info
+        naev.cache().genome_bank = mem.genome_bank -- for cross-plugin integration
+        evt.save()
+    end
+    print("in bank:")
+    for g, gi in pairs(mem.genome_bank) do
+        print(tostring(g))
+    end
+end
+
 local function purchase_hull ( hull, genome )
     local a_spob, a_sys = spob.cur()
     local strict_name = "Modified " .. hull
@@ -523,7 +539,7 @@ function EVO_DISCUSS_RESEARCH()
     end)
 
     vn.menu({
-        {"Purchase Ship", "g_buy"},
+        {"Purchase Sequence", "g_buy"},
         {"Prototype new hull", "g_hull"},
         {"Irradiate", "g_rad"},
         {"Forget", "g_del"},
@@ -531,10 +547,27 @@ function EVO_DISCUSS_RESEARCH()
     })
 
     vn.label("g_buy")
+    local price = 0
+    local entry
     vn.func(function()
-        local entry = fac_genomes[selected_genome_idx]
-        if entry then purchase_hull(entry.hull, entry.genome) end
+        entry = fac_genomes[selected_genome_idx]
+        price = entry.score * entry.genome:len()
     end)
+    scientist(function() return fmt.f("That'll cost you {v}, still want it?", {v=fmt.credits(price)}) end)
+    vn.menu({
+        {"Yes", "confirm_buy"},
+        {"No thanks", "end"}
+    })
+    vn.label("confirm_buy")
+    msg = "Alright then, here you go."
+    vn.func(function()
+        if entry then
+            purchase_sequence(entry.genome, entry, price)
+        else
+            msg = "Something went wrong, sorry, but the information is unusable."
+        end
+    end)
+    scientist(function() return msg end)
     vn.jump("end")
 
     vn.label("g_hull")
@@ -723,6 +756,9 @@ function load()
         if evo_table.genomes then GENOMES[f_id] = evo_table.genomes else GENOMES[f_id] = {} end
         init_ship_tables(f_id)
     end
+
+    -- for cross-plugin integration
+    naev.cache().genome_bank = mem.genome_bank
 
     player.infoButtonRegister(_("Evolution"), display_info, 3)
     land()

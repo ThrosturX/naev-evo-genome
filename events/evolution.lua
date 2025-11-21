@@ -442,6 +442,7 @@ local function purchase_sequence ( genome, g_info, price )
     end
 end
 
+-- TODO: remove/clean up
 local function purchase_hull ( hull, genome )
     local a_spob, a_sys = spob.cur()
     local strict_name = "Modified " .. hull
@@ -499,8 +500,8 @@ function EVO_MECHANIC()
     local msg_bye = "Catch you later."
     vn.label("start")
     local ps = player.pilot():ship()
-    local price = ps:size() * 100000
-    mechanic(fmt.f(_("Welcome to the shipyard, we'll take good care of your {stype} for the low price of just {price}. Did you bring the schematics?"), { stype = ps:name(), price = format.credits(price)}))
+    local price = ps:size() * 75000 - 25000
+    mechanic(fmt.f(_("Welcome to the shipyard, we'll take good care of your {stype} for the low price of just {price}. Did you bring the schematics?"), { stype = ps:name(), price = fmt.credits(price)}))
     local choices  = {}
     local bank_key = nil
     for g_key, g_info in pairs(mem.genome_bank) do
@@ -526,7 +527,9 @@ function EVO_MECHANIC()
         if player.credits() >= price and ng then
             player.pilot():intrinsicReset()
             player.shipvarPush("genome", ng)
-            dna_mod.apply_dna_to_pilot(player.pilot(), ng)
+            -- NOTE: The mechanic isn't perfect
+            local error_rate = 0.001 * ps:size()
+            dna_mod.apply_dna_to_pilot(player.pilot(), dna_mod.mutate_random(ng, error_rate))
             msg_bye = _("Alright, that should do it. Why don't you take her for a spin?")
             player.pay(-price)
             vn.sfxMoney()
@@ -564,7 +567,7 @@ function EVO_DISCUSS_RESEARCH()
 
     -- === START NODE ===
     vn.label("start")
-    scientist("How can I assist with our ongoing evolution project?")
+    scientist("How can I assist with our ongoing research project?")
 
     local choices = {
         {"Browse Blueprints", "view_genomes"},
@@ -584,7 +587,7 @@ function EVO_DISCUSS_RESEARCH()
         -- insert a new genome
         table.insert(fac_genomes, { genome = dna_mod.generate_junk_dna(determine_genome_size(fac)), score=0, hull="Llama"})
     end)
-    scientist("Well, okay then.")
+    scientist(_("Well, okay then. Sometimes it's better to start from zero."))
     vn.jump("end")
 
     vn.label("manage_bank")

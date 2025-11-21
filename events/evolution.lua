@@ -22,7 +22,7 @@ local spark         = require "luaspfx.spark"
 -- NOTE: 'tk' is global, do not require it.
 
 local dna_mod       = require "dna_modifier.dna_modifier"
--- luacheck: globals enter load EVO_CHECK_SYSTEM EVO_DISCUSS_RESEARCH EVOLVE SCORE_ATTACKED EVO_MINER_LANDED hailed
+-- luacheck: globals enter load EVO_CHECK_SYSTEM EVO_DISCUSS_RESEARCH EVO_MECHANIC EVOLVE SCORE_ATTACKED EVO_MINER_LANDED hailed
 
 -- Configuration
 local MAX_GENOMES          = 6
@@ -440,10 +440,6 @@ local function purchase_sequence ( genome, g_info, price )
         naev.cache().genome_bank = mem.genome_bank -- for cross-plugin integration
         evt.save()
     end
-    print("in bank:")
-    for g, gi in pairs(mem.genome_bank) do
-        print(tostring(g))
-    end
 end
 
 local function purchase_hull ( hull, genome )
@@ -451,6 +447,106 @@ local function purchase_hull ( hull, genome )
     local strict_name = "Modified " .. hull
     player.shipAdd(hull, strict_name, fmt.f("Acquired via Genetics research at {sp}", { sp = a_spob }), true)
     player.shipvarPush("genome", genome, strict_name)
+end
+
+local function make_label ( g_data )
+    return fmt.f(
+        "{g}-{c}/{l} ({s}/{h})",
+        {
+            g = string.sub(g_data.genome, 1, 4),
+            c = string.sub(dna_mod.get_complement(g_data.genome), 1, 4),
+            l = g_data.genome:len(),
+            h = g_data.hull,
+            s = g_data.score
+        }
+    )
+end
+
+-- analyze a genomic sequence as if it was a design schematic
+local function analyze_sequence ( entry )
+        -- Analytics
+        local breakdown_list = dna_mod.enumerate_codons(entry.genome)
+        local suppressor_count = 0
+        local breakdown_str = ""
+        for _, item in ipairs(breakdown_list) do
+            if string.find(item, "suppress") then
+                suppressor_count = suppressor_count + 1
+            end
+            breakdown_str = breakdown_str .. "\n - " .. item
+        end
+
+        local msg = fmt.f("Hull: {h}\nScore: {s}\nLabel: {g}...", {h=entry.hull, s=entry.score, g=make_label(entry)})
+
+        -- The requested summary:
+        msg = msg .. fmt.f("\n\nThe schematics detail {c} distinct modifications, {s} of which include advanced technology.", {c=#breakdown_list, s=suppressor_count})
+
+        msg = msg .. "\n\n[Net Attributes]"
+        local mods = dna_mod.decode_dna(entry.genome)
+        for k, v in pairs(mods) do msg = msg .. "\n" .. k .. ": " .. v end
+
+        msg = msg .. "\n\n[Codon Breakdown]" .. breakdown_str
+
+        return msg
+end
+
+function EVO_MECHANIC()
+
+    vn.reset()
+    vn.scene()
+    local mechanic = vn.newCharacter("Shipyard Mechanic", {image = "old_man.png"})
+    vn.transition()
+
+    local msg_bye = "Catch you later."
+    vn.label("start")
+    local ps = player.pilot():ship()
+    local price = ps:size() * 100000
+    mechanic(fmt.f(_("Welcome to the shipyard, we'll take good care of your {stype} for the low price of just {price}. Did you bring the schematics?"), { stype = ps:name(), price = format.credits(price)}))
+    local choices  = {}
+    local bank_key = nil
+    for g_key, g_info in pairs(mem.genome_bank) do
+        local label = make_label(g_info)
+        table.insert(choices, { label, label })
+        vn.label(label)
+        vn.func(function()
+            bank_key = g_key
+            vn.jump("mechanic_ready")
+        end)
+    end
+
+    if player.shipvarPeek("genome") then
+        table.insert(choices, { _("Remove Modifications"), "remove" })
+    end
+    table.insert(choices, { _("Nevermind"), "end" })
+
+    vn.label("mechanic_ready")
+    vn.menu(choices)
+    -- what to do with the selected schematic
+    vn.func(function()
+        local ng = mem.genome_bank[bank_key].genome
+        if player.credits() >= price and ng then
+            player.pilot():intrinsicReset()
+            player.shipvarPush("genome", ng)
+            dna_mod.apply_dna_to_pilot(player.pilot(), ng)
+            msg_bye = _("Alright, that should do it. Why don't you take her for a spin?")
+            player.pay(-price)
+            vn.sfxMoney()
+        elseif not ng then
+            msg_bye = _("My time isn't free, you know!")
+            vn.sfxEerie()
+        end
+    end)
+    vn.jump("end")
+
+    vn.label("remove")
+    vn.func(function()
+        player.shipvarPop("genome")
+        player.pilot():intrinsicReset()
+        msg_bye = _("No problem. She's exactly like a stock model, you won't be able to tell the difference!")
+    end)
+    vn.label("end")
+    mechanic(function () return msg_bye end)
+    vn.done()
+    vn.run()
 end
 
 function EVO_DISCUSS_RESEARCH()
@@ -471,11 +567,13 @@ function EVO_DISCUSS_RESEARCH()
     scientist("How can I assist with our ongoing evolution project?")
 
     local choices = {
-        {"Examine Genomes", "view_genomes"},
+        {"Browse Blueprints", "view_genomes"},
+        {"Access Terminal", "manage_bank"},
         {"Manage Ships", "manage_ships"},
         {"Scrap Research", "reset_research"},
         {"Leave", "end"}
     }
+    local bye_msg = "Farewell."
     vn.menu(choices)
 
     vn.label("reset_research")
@@ -489,16 +587,116 @@ function EVO_DISCUSS_RESEARCH()
     scientist("Well, okay then.")
     vn.jump("end")
 
+    vn.label("manage_bank")
+    vn.move(scientist, "farleft")
+    local terminal = vn.newCharacter("Computer Terminal", {image = "minerva_terminal.png"})
+    terminal("Please select a schematic.")
+    local bank_choices  = {}
+    local bank_key = nil
+    for g_key, g_info in pairs(mem.genome_bank) do
+        local label = make_label(g_info)
+        table.insert(bank_choices, { label, label })
+        vn.label(label)
+        vn.func(function()
+            bank_key = g_key
+            vn.jump("terminal_open")
+        end)
+    end
+
+    local poff = { _("Power off"), "terminal_end" }
+    table.insert(bank_choices, poff)
+
+    vn.label("terminal_open")
+    vn.menu(bank_choices)
+    -- what to do with the selected schematic
+    local bank_opts = {
+        { _("Overview"), "detail" },
+        { _("Examine Schematic"), "examine_genome" },
+        { _("Print copy"), "print_schematic" },
+        { _("Delete schematic"), "delete_bank" },
+        { _("Back to list"), "terminal_open" },
+        poff
+    }
+    vn.label("bkey_select_done")
+    vn.func(function()
+        msg = "The data seems corrupted."
+        if mem.genome_bank[bank_key] ~= nil then
+            msg = "You have selected schematic " .. make_label(mem.genome_bank[bank_key])
+        end
+    end)
+    terminal(function () return msg end)
+    vn.label("bank_opts")
+    vn.menu(bank_opts)
+    vn.label("detail")
+    terminal( function()
+        local genome = mem.genome_bank[bank_key].genome
+        if not genome then
+            msg = "Error!"
+            return
+        end
+        msg = ""
+        local expected = dna_mod.decode_dna(genome)
+        for attribute, xpctd in pairs(expected) do
+            msg = msg .. (fmt.f("\n{attr}: {x}", { attr = attribute, x = xpctd } ))
+        end
+        return(msg)
+    end )
+
+    vn.jump("bank_opts")
+    vn.label("print_schematic")
+    local printed_schematic -- can be used by splice later TODO
+    vn.func(function()
+        msg = "The printer doesn't seem to be working."
+        printed_schematic = mem.genome_bank[bank_key].genome
+        if printed_schematic ~= nil then
+            msg = fmt.f("The {s} schematics have been sent to the printer.", { s = make_label(mem.genome_bank[bank_key]) })
+        end
+    end)
+    terminal(function () return msg end)
+    vn.move(terminal, "farright")
+    vn.move(scientist)
+
+
+    vn.jump("start")
+
+    vn.label("examine_genome")
+    terminal(function()
+        local entry = mem.genome_bank[bank_key]
+        return analyze_sequence(entry)
+    end)
+    vn.jump("bank_opts")
+
+    vn.label("delete_bank")
+    terminal(function () return fmt.f("Are you sure you want to permanently delete the {g} schematics?", { g = make_label(mem.genome_bank[bank_key]) })
+    end)
+    vn.menu({
+        { _("Yes, I'm sure!"), "confirm_delete_bank" },
+        { _("Nevermind"), "terminal_open" },
+    })
+    vn.label("confirm_delete_bank")
+
+    vn.func(function()
+        mem.genome_bank[bank_key] = nil
+    end)
+
+    vn.label("terminal_end")
+    vn.disappear(terminal)
+    vn.move(scientist)
+    bye_msg = _("Let me know if you need anything else.")
+    vn.jump("end")
+
     -- === GENOME SECTION ===
     vn.label("view_genomes")
     local g_choices = {}
     for i, entry in ipairs(fac_genomes) do
-        local label = fmt.f("({s}) {g}/{l} ({hull})", { s=entry.score, g=string.sub(entry.genome,1,8), l=entry.genome:len(), hull=entry.hull })
-        table.insert(g_choices, { label, "set_g_idx_"..i })
+        if entry.genome then
+            local label = fmt.f("({s}) {g}/{l} ({hull})", { s=entry.score, g=string.sub(entry.genome,1,8), l=entry.genome:len(), hull=entry.hull })
+            table.insert(g_choices, { label, "set_g_idx_"..i })
+       end
     end
     table.insert(g_choices, {"Back", "start"})
 
-    scientist(fmt.f("We have {n} genomes stored.", {n=#fac_genomes}))
+    scientist(fmt.f("We have {n} blueprints available.", {n=#fac_genomes}))
     vn.menu(g_choices)
 
     -- Define selection nodes
@@ -511,37 +709,15 @@ function EVO_DISCUSS_RESEARCH()
     vn.label("show_genome")
     scientist(function()
         local entry = fac_genomes[selected_genome_idx]
-        if not entry then return "Error: Genome lost." end
-
-        -- Analytics
-        local breakdown_list = dna_mod.enumerate_codons(entry.genome)
-        local suppressor_count = 0
-        local breakdown_str = ""
-        for _, item in ipairs(breakdown_list) do
-            if string.find(item, "suppress") then
-                suppressor_count = suppressor_count + 1
-            end
-            breakdown_str = breakdown_str .. "\n - " .. item
-        end
-
-        local msg = fmt.f("Hull: {h}\nScore: {s}\nSeq: {g}...", {h=entry.hull, s=entry.score, g=string.sub(entry.genome, 1, 16)})
-
-        -- The requested summary:
-        msg = msg .. fmt.f("\n\nThe genome has {c} known codons, {s} of which are suppressor genes.", {c=#breakdown_list, s=suppressor_count})
-
-        msg = msg .. "\n\n[Net Attributes]"
-        local mods = dna_mod.decode_dna(entry.genome)
-        for k, v in pairs(mods) do msg = msg .. "\n" .. k .. ": " .. v end
-
-        msg = msg .. "\n\n[Codon Breakdown]" .. breakdown_str
-
-        return msg
+        if not entry then return "Error: Schematic lost." end
+        return analyze_sequence(entry)
     end)
 
     vn.menu({
         {"Purchase Sequence", "g_buy"},
         {"Prototype new hull", "g_hull"},
-        {"Irradiate", "g_rad"},
+        {"Simplify", "g_rad"},
+        {"Improve", "g_splice"},
         {"Forget", "g_del"},
         {"Back", "view_genomes"}
     })
@@ -551,7 +727,7 @@ function EVO_DISCUSS_RESEARCH()
     local entry
     vn.func(function()
         entry = fac_genomes[selected_genome_idx]
-        price = entry.score * entry.genome:len()
+        price = math.ceil(entry.score * entry.genome:len() * 0.1)
     end)
     scientist(function() return fmt.f("That'll cost you {v}, still want it?", {v=fmt.credits(price)}) end)
     vn.menu({
@@ -559,6 +735,7 @@ function EVO_DISCUSS_RESEARCH()
         {"No thanks", "end"}
     })
     vn.label("confirm_buy")
+    vn.sfxMoney()
     msg = "Alright then, here you go."
     vn.func(function()
         if entry then
@@ -592,16 +769,49 @@ function EVO_DISCUSS_RESEARCH()
     vn.func(function()
         local entry = fac_genomes[selected_genome_idx]
         if entry then
-             local target = tk.input("Radiation Target", 4, 16, "mutagen type")
-             if target then
-                 -- remove the old one (consumed by research)
-                 table.remove(fac_genomes, selected_genome_idx)
-                 local res = dna_mod.research_irradiate(entry.genome, target)
-                 table.insert(fac_genomes, { genome=dna_mod.mutate_random(res, 0.01), score=entry.score, hull=entry.hull })
-             end
+            local target = tk.input("Radiation Target", 4, 16, "mutagen type")
+            if target then
+                -- remove the old one (consumed by research)
+                table.remove(fac_genomes, selected_genome_idx)
+                local res = dna_mod.research_irradiate(entry.genome, target)
+                table.insert(fac_genomes, { genome=dna_mod.mutate_random(res, 0.01), score=entry.score, hull=entry.hull })
+            end
         end
     end)
     scientist("Experimental genome added to pool.")
+    vn.jump("end")
+
+    vn.label("g_splice")
+    vn.func(function() 
+        -- if there's no printed schematic, generate a random doodle that happens to be lying around
+        if not printed_schematic then
+            printed_schematic = dna_mod.generate_junk_dna(42)
+        end
+        msg = "Let's see if we can draw some inspiration from the schematics I have lying around:"
+        local breakdown_list = dna_mod.enumerate_codons(printed_schematic)
+        for _, item in ipairs(breakdown_list) do
+            msg = msg .. "\n - " .. item
+        end
+    end)
+    scientist(function () return msg end)
+    -- logical separation in case of donor logic changes
+    vn.func(function()
+        local entry = fac_genomes[selected_genome_idx]
+        if entry then
+            local target = tk.input("Blueprint Research", 4, 16, "target codon")
+            local donor = printed_schematic
+            if target and donor then
+                local outcome = dna_mod.research_splice(entry.genome, donor, target)
+                msg = outcome.log
+                -- remove the old one (consumed by research)
+                if outcome.dna then
+                    table.remove(fac_genomes, selected_genome_idx)
+                    table.insert(fac_genomes, { genome=outcome.dna, score=entry.score, hull=entry.hull })
+                end
+            end
+        end
+    end)
+    vn.na(function() return msg end)
     vn.jump("end")
 
     vn.label("g_del")
@@ -651,14 +861,14 @@ function EVO_DISCUSS_RESEARCH()
 
     -- === END ===
     vn.label("end")
-    scientist("Farewell.")
+    scientist(function() return bye_msg end)
     vn.done()
     vn.run()
 end
 
 local function createNpcs()
-    local id = evt.npcAdd("EVO_DISCUSS_RESEARCH", _("Station Scientist"), "zalek3.webp", "Evolution Research", 3)
-    print("Created NPC ID " .. tostring(id))
+    local _id = evt.npcAdd("EVO_DISCUSS_RESEARCH", _("Station Scientist"), "zalek3.webp", "Evolution Research", 6)
+    _id = evt.npcAdd("EVO_MECHANIC", _("Shipyard Engineer"), "old_man.png", "Shipyard Engineer", 7)
 end
 
 function hailed(receiver)

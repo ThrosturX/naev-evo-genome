@@ -22,7 +22,7 @@ local spark         = require "luaspfx.spark"
 -- NOTE: 'tk' is global, do not require it.
 
 local dna_mod       = require "dna_modifier.dna_modifier"
--- luacheck: globals enter load EVO_CHECK_SYSTEM EVO_DISCUSS_RESEARCH EVO_MECHANIC EVOLVE SCORE_ATTACKED EVO_MINER_LANDED hailed
+-- luacheck: globals enter load EVO_CHECK_SYSTEM EVO_DISCUSS_RESEARCH EVO_MECHANIC EVO_SHIP_DEALER EVOLVE SCORE_ATTACKED EVO_MINER_LANDED EVO_TRADER_JUMPED hailed
 
 -- Configuration
 local MAX_GENOMES          = 6
@@ -34,6 +34,7 @@ local SIZE_CUTOFF          = 3.0 -- Size threshold for Small vs Big ships
 
 -- Persistent runtime storage
 local GENOMES = {}
+local SHIP_DEALER_STOCK = {}
 
 -- Default Ship Pools (Fallback)
 local DEFAULT_SMALL = {
@@ -93,13 +94,17 @@ function pick_top_genome(f_id, fallback_size)
 
     -- Prune
     while #topScorers > MAX_GENOMES do
-        table.remove(topScorers)
+        local scrapped_ship = table.remove(topScorers)
+        if math.random(25) == 1 and #SHIP_DEALER_STOCK < 6 then
+            table.insert(SHIP_DEALER_STOCK, scrapped_ship)
+        end
     end
 
     -- Cataclysm
-    if math.random(100) < CATACLYSM_CHANCE then
+    if math.random(100) < CATACLYSM_CHANCE and #topScorers >= 4 then
         print(fmt.f("CATACLYSM for {f}! Keeping top 3.", {f = f_id}))
         topScorers = { topScorers[1], topScorers[2], topScorers[3] }
+        table.insert(SHIP_DEALER_STOCK, topScorers[4]) -- dealer gets the runner up
     end
 
     GENOMES[f_id] = topScorers
@@ -208,7 +213,38 @@ local function determine_genome_size(fac)
     return val
 end
 
-function spawn_miner(fac, hull)
+function spawn_trader( fac, hull )
+    -- Auto-pick hull if missing
+    if not hull or not ship.get(hull) then
+        local pool = {
+            "Koala", "Quicksilver", "Rhino", "Pirate Rhino",
+            "Goddard Merchantman", "Llama", "Gawain", "Hyena",
+            "Plowshare", "Mule", "Zebra"
+        }
+        hull = pool[math.random(#pool)]
+    end
+    local trader = pilot.add(hull, fac, spob.get( faction.get(fac) ), fmt.f(_("Trader {h}"), { h = hull }), { ai = "trader" }) 
+    trader:changeAI("trader")
+    trader:setFaction(fac)
+    local pmem = trader:memory()
+    pmem.shield_run = 40
+    pmem.armour_run = 90
+
+    local genomes = GENOMES[fac]
+    -- give it a random genome
+    if genomes and #genomes >= 1 then
+        pmem.genome = genomes[math.random(#genomes)].genome
+        dna_mod.apply_dna_to_pilot(trader, pmem.genome)
+        -- hook it on jumping (success for a trader)
+        if not pmem.jhook then
+            pmem.jhook = hook.pilot(trader, "jump", "EVO_TRADER_JUMPED")
+        end
+    end
+
+    return trader
+end
+
+function spawn_miner( fac, hull )
     -- Auto-pick hull if missing
     if not hull or not ship.get(hull) then
         local pool = {
@@ -338,6 +374,29 @@ function EVO_MINER_ATTACKED(receiver, attacker, amount)
     end
 end
 
+-- miners are only scored if they manage to jump
+function EVO_TRADER_JUMPED( trader, _destination )
+    -- calculate cargo worth
+    local total_value = 0
+    for _i, v in ipairs(trader:cargoList()) do
+        total_value = total_value + v.q * math.max(325, v.c:price())
+    end
+    local pmem = trader:memory()
+    if not pmem.score then pmem.score = 0 end
+    local final_score = math.floor((total_value * 0.0247 / trader:ship():size()) + pmem.score)
+
+    local f_id = trader:faction():nameRaw()
+    if final_score > 330 and #GENOMES[f_id] < MAX_GENOMES + 3 then
+        local hull = trader:ship():nameRaw()
+        local genome = pmem.genome
+        -- contribute to the genome
+        table.insert(GENOMES[f_id], { genome = genome, score  = final_score, hull = hull })
+
+        trader:comm(fmt.f("I escaped with cargo worth {t}! (final score {s})", { t = total_value, s = final_score } ))
+    end
+    print(fmt.f("{f} {h} jumped with cargo worth {t}! (final score {s})", { t = total_value, s = final_score, h = trader:ship():nameRaw(), f = f_id } ))
+end
+
 -- miners are only scored if they manage to land
 function EVO_MINER_LANDED(miner, location)
     -- calculate cargo worth
@@ -439,15 +498,29 @@ local function purchase_sequence ( genome, g_info, price )
         mem.genome_bank[genome] = g_info
         naev.cache().genome_bank = mem.genome_bank -- for cross-plugin integration
         evt.save()
+        return true
     end
+    return false
 end
 
--- TODO: remove/clean up
-local function purchase_hull ( hull, genome )
+local function purchase_hull ( hull, genome, price )
+    -- got the cash?
+    if player.credits() < price then
+        return false
+    end
     local a_spob, a_sys = spob.cur()
     local strict_name = "Modified " .. hull
-    player.shipAdd(hull, strict_name, fmt.f("Acquired via Genetics research at {sp}", { sp = a_spob }), true)
-    player.shipvarPush("genome", genome, strict_name)
+    local result_name = player.shipAdd(hull, strict_name, fmt.f("Acquired from a shady dealer at {sp}", { sp = a_spob }), true)
+    player.shipvarPush("genome", genome, result_name)
+
+    -- lucky player, finds the ship schematics in the glove box!
+    if not mem.genome_bank then
+        mem.genome_bank = {}
+    end
+    mem.genome_bank[genome] = g_info
+    naev.cache().genome_bank = mem.genome_bank -- for cross-plugin integration
+    evt.save()
+    return true
 end
 
 local function make_label ( g_data )
@@ -490,8 +563,83 @@ local function analyze_sequence ( entry )
         return msg
 end
 
-function EVO_MECHANIC()
+function EVO_SHIP_DEALER( npc_id )
+    -- pick a random genome from the local database
+    local loc = spob.cur()
+    local fac = loc:faction():nameRaw()
+    local stolen_hulls = SHIP_DEALER_STOCK
+    local g_ind = math.random(#stolen_hulls)
+    local g_info = stolen_hulls[g_ind]
+    table.remove(SHIP_DEALER_STOCK, g_ind)
+    if not g_info then
+        g_info = { genome = dna_mod.generate_junk_dna(64), hull = "Quicksilver", score = 117 }
+    end
+    local _oprice, price = ship.get(g_info.hull):price()
+    price = price + g_info.score * g_info.genome:len()
 
+    -- enumerate techs
+    local breakdown_list = dna_mod.enumerate_codons(g_info.genome)
+    local num_mods = 0
+    local num_tech = 0
+    for _i, item in ipairs(breakdown_list) do
+        if string.find(item, "suppress") then
+            num_tech = num_tech + 1
+        else 
+            num_mods = num_mods + 1
+        end
+        print(item)
+    end
+
+    local extra = ""
+    if math.random(2) == 1 and num_tech > 1 then
+        extra = fmt.f(_("It comes with at least {num} high-tech upgrades!"), { num = math.random(2, num_tech) })
+    end
+
+    local msg_bye = _("You're attracting too much attention.")
+    vn.reset()
+    vn.scene()
+    local dealer = vn.newCharacter(_("Shady Ship Dealer"), {image = "scavenger1.png"})
+    vn.transition()
+    vn.label("start")
+    dealer(fmt.f(_("Interested in a {hull} with {num} modifications? {extra}"), { hull = g_info.hull, num = num_mods, extra = extra }))
+    vn.menu({
+        {_("Tell me more!"), "ship_detail"},
+        {_("No thanks."), "sayonara"},
+    })
+    vn.label("ship_detail")
+    if math.random(2) == 1 then
+        if num_tech > 1 then
+            extra = fmt.f(_("Did I mention that it comes with {num} high-tech upgrades?"), { num = num_tech })
+        else
+            extra = ""
+        end
+    else
+        local amt = math.ceil(g_info.score * g_info.genome:len() * math.random(2,8))
+        extra = fmt.f(_("The schematics alone are worth at least {amount}"), { amount = fmt.credits(amt) })
+    end
+    dealer(fmt.f(_("I only want a measly {amount} for it, what do you say? {extra}"), { amount = fmt.credits(price), extra = extra }))
+    vn.menu({
+        {_("I'll take it!"), "purchase_hull"},
+        {_("No thanks."), "sayonara"}
+    })
+    vn.label("purchase_hull")
+    vn.func(function()
+        if purchase_hull( g_info.hull, g_info.genome, price ) then
+            vn.sfxMoney()
+            msg_bye = _("Pleasure doing business with you.")
+        else
+            msg_bye = _("Don't waste my time, kid.")
+        end
+    end)
+    -- intentional fallthrough
+    vn.label("sayonara")
+    dealer(function() return msg_bye end)
+    vn.done()
+    vn.run()
+    evt.npcRm( npc_id )
+end
+
+function EVO_MECHANIC()
     vn.reset()
     vn.scene()
     local mechanic = vn.newCharacter("Shipyard Mechanic", {image = "old_man.png"})
@@ -585,7 +733,7 @@ function EVO_DISCUSS_RESEARCH()
             table.remove(fac_genomes, i)
         end
         -- insert a new genome
-        table.insert(fac_genomes, { genome = dna_mod.generate_junk_dna(determine_genome_size(fac)), score=0, hull="Llama"})
+        table.insert(fac_genomes, { genome = dna_mod.generate_junk_dna(determine_genome_size(fac)), score=1, hull="Llama"})
     end)
     scientist(_("Well, okay then. Sometimes it's better to start from zero."))
     vn.jump("end")
@@ -768,20 +916,20 @@ function EVO_DISCUSS_RESEARCH()
     vn.jump("end")
 
     vn.label("g_rad")
-    scientist("The available mutagens to target are:\nterminator, defense, propulsion, weaponry, utility\nNote that the purpose of radiation research is to neutralize the target mutagen.")
+    scientist("The available areas to target are:\nterminator, defense, propulsion, weaponry, utility\nNote that the purpose of blueprint simplification is to change or remove an existing feature. Removing a 'terminator' can often result in substantial changes. All changes have a chance of having a cascading effect due to tight system integration.")
     vn.func(function()
         local entry = fac_genomes[selected_genome_idx]
         if entry then
-            local target = tk.input("Radiation Target", 4, 16, "mutagen type")
+            local target = tk.input("Schematic Simplification", 4, 16, "target area")
             if target then
                 -- remove the old one (consumed by research)
                 table.remove(fac_genomes, selected_genome_idx)
                 local res = dna_mod.research_irradiate(entry.genome, target)
-                table.insert(fac_genomes, { genome=dna_mod.mutate_random(res, 0.01), score=entry.score, hull=entry.hull })
+                table.insert(fac_genomes, { genome=dna_mod.mutate_random(res, 0.006), score=entry.score, hull=entry.hull })
             end
         end
     end)
-    scientist("Experimental genome added to pool.")
+    scientist("We'll replace the old schematics in this blueprint with the new suggestions.")
     vn.jump("end")
 
     vn.label("g_splice")
@@ -819,9 +967,14 @@ function EVO_DISCUSS_RESEARCH()
 
     vn.label("g_del")
     vn.func(function()
-        table.remove(fac_genomes, selected_genome_idx)
+        local scrapped_ship = table.remove(fac_genomes, selected_genome_idx)
+        msg = "We'll throw out those blueprints. I don't think we really needed them anyway."
+        if math.random(2) == 1 then
+            table.insert(SHIP_DEALER_STOCK, scrapped_ship)
+            msg = _("We'll get rid of the prototype and focus our research elsewhere.")
+        end
     end)
-    scientist("Genome data purged.")
+    scientist(function() return msg end)
     vn.jump("end")
 
     -- === SHIPS SECTION ===
@@ -870,8 +1023,9 @@ function EVO_DISCUSS_RESEARCH()
 end
 
 local function createNpcs()
-    local _id = evt.npcAdd("EVO_DISCUSS_RESEARCH", _("Station Scientist"), "zalek3.webp", "Evolution Research", 6)
-    _id = evt.npcAdd("EVO_MECHANIC", _("Shipyard Engineer"), "old_man.png", "Shipyard Engineer", 7)
+    local _id = evt.npcAdd("EVO_DISCUSS_RESEARCH", _("Ship Researcher"), "zalek3.webp", _("You see the station's Ship Researcher, who is in charge of all the research and schematics around here."), 6)
+    _id = evt.npcAdd("EVO_MECHANIC", _("Shipyard Engineer"), "old_man.png", "The Shipyard Engineer has so much experience in tinkering with spaceships that he can adapt your ship to any blueprint schematics you provide him with. You can't help but wonder if such an old man could really pull off complicated jobs without making mistakes.", 7)
+    _id = evt.npcAdd("EVO_SHIP_DEALER", _("Shady Dealer"), "pirate/pirate_militia2.webp", _("A shady figure signals you to come over. It's obvious by the hand signals that you're about to score some kind of black market deal."), 7)
 end
 
 function hailed(receiver)
@@ -993,7 +1147,25 @@ function enter()
     if not mem.evolution_data.lhook then mem.evolution_data.lhook = hook.land("land") end
 end
 
+local function calc_power ( group )
+    local pow = 0
+    for _, p in ipairs(group) do
+        local pmem = p:memory()
+        if pmem.genome ~= nil then
+            if pmem.score and pmem.score > 100 then
+                pow = pow + p:ship():size()
+            elseif pmem.wimp then
+                pow = pow + 0.5
+            else
+                pow = pow + 0.2 * p:ship():size()
+            end
+        end
+    end
+    return pow
+end
+
 local MINERS = {}
+local TRADERS = {}
 -- Arena Loop
 function EVO_CHECK_SYSTEM()
     local cur = system.cur()
@@ -1007,18 +1179,19 @@ function EVO_CHECK_SYSTEM()
         if pop > 20 then
             sp:damage(pop * sp:ship():size(), 0, 10, "explosion_splash")
         end
-        if sp:pos():dist() > ARENA_RADIUS then
+        local dist = sp:pos():dist()
+        if dist > ARENA_RADIUS then
             local spmem = sp:memory()
             if spmem.genome then
-                sp:damage(100, 0, 10, "explosion_splash") -- gentle nudge damage
+                sp:damage(dist * 0.00016, 0, 10, "explosion_splash") -- gentle nudge damage
                 spark(sp:pos(), sp:vel()*-1, 50)
                 spmem.aggressive = true
             end
         end
     end
     
---[[ spawn miner here --]]
-    local roll = math.random(3)
+--[[ spawn civs here --]]
+    local roll = math.random(10)
     if roll == 1 then
         local mp = MINERS[FAC_BLUE]
         if not mp or not mp:exists() then
@@ -1029,31 +1202,33 @@ function EVO_CHECK_SYSTEM()
         if not mp or not mp:exists() then
             MINERS[FAC_RED] = spawn_miner(FAC_RED)
         end
+    elseif roll == 3 then
+        local tp = TRADERS[FAC_BLUE]
+        if not tp or not tp:exists() then
+            TRADERS[FAC_BLUE] = spawn_trader(FAC_BLUE)
+        end
+    elseif roll == 4 then
+        local tp = TRADERS[FAC_RED]
+        if not tp or not tp:exists() then
+            TRADERS[FAC_RED] = spawn_trader(FAC_RED)
+        end
     end
     --]]
 
     local blues = pilot.get(faction.get(FAC_BLUE))
     local reds = pilot.get(faction.get(FAC_RED))
 
+    -- blind spots
+    if not blues and not reds and math.random(5) > 1 then
+        hook.timer(math.random(12), "EVO_CHECK_SYSTEM")
+    end
+
     -- periodic pause
     if blues and reds and math.random(2) == 1 then
         hook.timer(10 + math.random(5), "EVO_CHECK_SYSTEM")
         return
     end
-    local b_pow, r_pow = 0, 0
-    for _, p in ipairs(blues) do
-        local pmem = p:memory()
-        if pmem.genome ~= nil then
-            if pmem.score and pmem.score > 100 then
-                b_pow = b_pow + p:ship():size()
-            elseif pmem.wimp then
-                b_pow = b_pow + 0.5
-            else
-                b_pow = b_pow + 0.2 * p:ship():size()
-            end
-        end
-    end
-    for _, p in ipairs(reds) do r_pow = r_pow + p:ship():size() end
+    local b_pow, r_pow = calc_power(blues), calc_power(reds)
 
     -- Blue Logic
     if not blues or #blues == 0 or (math.random(4)==1 and b_pow < 5) then

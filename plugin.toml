@@ -3,6 +3,7 @@ name = "Evolving Research Factions"
 author = "ThrosturX"
 version = "0.0.1"
 abstract = "Introduces Genetic-Algorithm inspired research that allows the player to collect blueprints that can be used to modify the player ship."
+release_status = "development"
 naev_version = ">= 0.13.0"
 source = { git = "https://github.com/ThrosturX/naev-evo-genome.git" }
 
